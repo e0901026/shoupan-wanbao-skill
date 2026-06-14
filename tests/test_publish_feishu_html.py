@@ -71,8 +71,81 @@ class PublishFeishuHtmlTest(unittest.TestCase):
 
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["title"], "A股收盘晚报")
+            self.assertEqual(payload["publish_mode"], "html_import")
+            self.assertEqual(payload["import_preview"]["upload"]["parent_type"], "ccm_import_open")
+            self.assertEqual(json.loads(payload["import_preview"]["upload"]["extra"])["file_extension"], "html")
+            self.assertEqual(payload["import_preview"]["task"]["file_extension"], "html")
+            self.assertEqual(payload["import_preview"]["task"]["type"], "docx")
             self.assertEqual(payload["docx_blocks"][0]["block_type"], "heading1")
             self.assertIn("分享卡片", payload["card_preview"]["elements"][0]["text"]["content"])
+
+    def test_import_payload_uses_html_source_for_fidelity(self) -> None:
+        html_path = Path("output/a_share_evening_report_2026-06-12.html")
+
+        upload = publish_feishu_html.build_import_upload_preview(html_path)
+        task = publish_feishu_html.build_import_task_body("boxcnTOKEN", "A股收盘晚报", "folderTOKEN", "html")
+
+        self.assertEqual(upload["file_name"], html_path.name)
+        self.assertEqual(upload["parent_type"], "ccm_import_open")
+        self.assertEqual(json.loads(upload["extra"]), {"obj_type": "docx", "file_extension": "html"})
+        self.assertEqual(task["file_token"], "boxcnTOKEN")
+        self.assertEqual(task["file_extension"], "html")
+        self.assertEqual(task["type"], "docx")
+        self.assertEqual(task["point"], {"mount_type": 1, "mount_key": "folderTOKEN"})
+
+    def test_html_import_publisher_uploads_then_imports_and_polls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = Path(tmp) / "report.html"
+            html_path.write_text("<html><body><h1>A股收盘晚报</h1></body></html>", encoding="utf-8")
+            publisher = publish_feishu_html.FeishuHtmlPublisher("app", "secret")
+            publisher._token = "tenant-token"
+
+            post_payloads = []
+            get_urls = []
+
+            def fake_post(url, **kwargs):
+                post_payloads.append((url, kwargs))
+                response = requests.Response()
+                response.status_code = 200
+                if url.endswith("/medias/upload_all"):
+                    response._content = json.dumps({"code": 0, "data": {"file_token": "boxcnTOKEN"}}).encode()
+                elif url.endswith("/import_tasks"):
+                    response._content = json.dumps({"code": 0, "data": {"ticket": "ticket-1"}}).encode()
+                else:
+                    response._content = json.dumps({"code": 0}).encode()
+                return response
+
+            def fake_get(url, **kwargs):
+                get_urls.append(url)
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "code": 0,
+                        "data": {
+                            "result": {
+                                "ticket": "ticket-1",
+                                "job_status": 0,
+                                "token": "docxTOKEN",
+                                "url": "https://example.feishu.cn/docx/docxTOKEN",
+                            }
+                        },
+                    }
+                ).encode()
+                return response
+
+            with patch.object(publish_feishu_html.requests, "post", side_effect=fake_post), patch.object(
+                publish_feishu_html.requests, "get", side_effect=fake_get
+            ):
+                result = publisher.import_html_as_docx(html_path, "A股收盘晚报", "folderTOKEN", poll_interval=0)
+
+            self.assertEqual(result["url"], "https://example.feishu.cn/docx/docxTOKEN")
+            self.assertTrue(post_payloads[0][0].endswith("/drive/v1/medias/upload_all"))
+            self.assertEqual(post_payloads[0][1]["data"]["parent_type"], "ccm_import_open")
+            self.assertEqual(json.loads(post_payloads[0][1]["data"]["extra"])["file_extension"], "html")
+            self.assertTrue(post_payloads[1][0].endswith("/drive/v1/import_tasks"))
+            self.assertEqual(post_payloads[1][1]["json"]["type"], "docx")
+            self.assertEqual(get_urls, [f"{publisher.base}/drive/v1/import_tasks/ticket-1"])
 
     def test_validate_env_value_rejects_placeholders_and_truncated_values(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "FEISHU_APP_SECRET"):
@@ -96,6 +169,12 @@ class PublishFeishuHtmlTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "invalid receive_id"):
             publish_feishu_html.ensure_feishu_ok(response, "send card")
+
+    def test_publish_feishu_v4_compat_entrypoint_exists(self) -> None:
+        wrapper = ROOT / "scripts" / "publish_feishu_v4.py"
+
+        self.assertTrue(wrapper.exists())
+        self.assertIn("publish_feishu_html", wrapper.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

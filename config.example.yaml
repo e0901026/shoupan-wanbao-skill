@@ -114,5 +114,8 @@ feishu:
   receive_id_env: FEISHU_RECEIVE_ID
   receive_id_type: chat_id  # chat_id / open_id / user_id / email
   folder_token_env: FEISHU_FOLDER_TOKEN
+  # html_import：优先通过飞书官方“导入 HTML 文件为新版文档”流程，尽量保留 HTML 样式和表格数据。
+  # docx_blocks：把 HTML 解析成飞书文档块，方便编辑，但不能 1:1 保留 CSS 和复杂表格样式。
+  publish_mode: html_import
   # true 表示仅生成 HTML 和飞书 dry-run 预览；安装时选择启用飞书发布会改为 false。
   dry_run: true

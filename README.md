@@ -79,16 +79,23 @@ python scripts/run_daily.py --config config.yaml --publish-feishu
 流程：
 
 1. 生成 `output/a_share_evening_report_YYYY-MM-DD.html`
-2. `scripts/publish_feishu_html.py` 将 HTML 转为飞书 docx blocks
-3. 创建飞书文档
-4. 发送飞书文档分享卡片
+2. `scripts/publish_feishu_html.py` 默认使用 `html_import`：先上传 HTML，再通过飞书官方导入任务导入为新版文档
+3. 发送飞书文档分享卡片
 
 默认 `feishu.dry_run: true` 时不会调用真实飞书 API，只会生成 `.feishu_dry_run.json` 预览。
+
+`html_import` 是追求“尽量 1:1 还原 HTML 样式和数据”的主路径。`docx_blocks` 仅作为降级模式，优点是正文更像飞书原生可编辑块，缺点是飞书 block API 不支持任意 HTML/CSS，不能保证视觉 1:1。
 
 如果只想先验证 HTML 能否转换为飞书文档，不发送分享卡片：
 
 ```bash
 python scripts/publish_feishu_html.py --config config.yaml --html output/a_share_evening_report_YYYY-MM-DD.html --analysis data/analysis.json --doc-only
+```
+
+兼容旧调用名：
+
+```bash
+python scripts/publish_feishu_v4.py --config config.yaml --html output/a_share_evening_report_YYYY-MM-DD.html --analysis data/analysis.json --doc-only
 ```
 
 `FEISHU_RECEIVE_ID` 必须是真实的飞书接收 ID，不能写“当前频道”。`receive_id_type` 要与 ID 类型匹配，例如 `chat_id` 通常对应 `oc_...`。脚本会拒绝 `xxx`、`...`、截断 secret 等占位值；飞书返回 400 时会输出响应 body 便于定位。

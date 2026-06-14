@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,7 @@ from common import env_value, load_yaml, read_json
 
 FEISHU_APP_ENV = ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]
 FEISHU_SEND_ENV = ["FEISHU_RECEIVE_ID"]
+PUBLISH_MODES = {"html_import", "docx_blocks"}
 
 
 def clean_text(value: str) -> str:
@@ -117,6 +119,26 @@ def lark_text(text: str) -> Dict[str, Any]:
     return {"elements": [{"text_run": {"content": text}}]}
 
 
+def build_import_upload_preview(html_path: Path, target_type: str = "docx") -> Dict[str, str]:
+    return {
+        "file_name": html_path.name,
+        "parent_type": "ccm_import_open",
+        "parent_node": "",
+        "size": str(html_path.stat().st_size) if html_path.exists() else "<html file size>",
+        "extra": json.dumps({"obj_type": target_type, "file_extension": "html"}, ensure_ascii=False),
+    }
+
+
+def build_import_task_body(file_token: str, title: str, folder_token: Optional[str], file_extension: str = "html") -> Dict[str, Any]:
+    return {
+        "file_extension": file_extension,
+        "file_token": file_token,
+        "type": "docx",
+        "file_name": title,
+        "point": {"mount_type": 1, "mount_key": folder_token or ""},
+    }
+
+
 def block_to_feishu_children(block: Dict[str, Any]) -> List[Dict[str, Any]]:
     block_type = block.get("block_type")
     if block_type == "table":
@@ -158,6 +180,9 @@ class FeishuHtmlPublisher:
     def headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.tenant_access_token()}", "Content-Type": "application/json; charset=utf-8"}
 
+    def auth_headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.tenant_access_token()}"}
+
     def create_docx(self, title: str, folder_token: Optional[str]) -> str:
         body: Dict[str, Any] = {"title": title}
         if folder_token:
@@ -181,6 +206,68 @@ class FeishuHtmlPublisher:
             timeout=30,
         )
         return ensure_feishu_ok(resp, "append docx blocks")
+
+    def upload_import_source(self, html_path: Path) -> str:
+        data = build_import_upload_preview(html_path)
+        with html_path.open("rb") as fh:
+            resp = requests.post(
+                f"{self.base}/drive/v1/medias/upload_all",
+                headers=self.auth_headers(),
+                data=data,
+                files={"file": (html_path.name, fh, "text/html")},
+                timeout=60,
+            )
+        payload = ensure_feishu_ok(resp, "upload html import source")
+        file_token = (payload.get("data") or {}).get("file_token")
+        if not file_token:
+            raise RuntimeError(f"Feishu import upload file_token missing: {payload}")
+        return file_token
+
+    def create_import_task(self, file_token: str, title: str, folder_token: Optional[str]) -> str:
+        resp = requests.post(
+            f"{self.base}/drive/v1/import_tasks",
+            headers=self.headers(),
+            json=build_import_task_body(file_token, title, folder_token, "html"),
+            timeout=20,
+        )
+        payload = ensure_feishu_ok(resp, "create import task")
+        ticket = (payload.get("data") or {}).get("ticket")
+        if not ticket:
+            raise RuntimeError(f"Feishu import ticket missing: {payload}")
+        return ticket
+
+    def get_import_task(self, ticket: str) -> Dict[str, Any]:
+        resp = requests.get(f"{self.base}/drive/v1/import_tasks/{ticket}", headers=self.headers(), timeout=20)
+        payload = ensure_feishu_ok(resp, "get import task")
+        result = (payload.get("data") or {}).get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Feishu import result missing: {payload}")
+        return result
+
+    def poll_import_task(self, ticket: str, poll_interval: float = 2.0, max_polls: int = 30) -> Dict[str, Any]:
+        for _ in range(max_polls):
+            result = self.get_import_task(ticket)
+            status = result.get("job_status")
+            if status == 0:
+                return result
+            if status not in (1, 2):
+                raise RuntimeError(f"Feishu import failed: {json.dumps(result, ensure_ascii=False)}")
+            if poll_interval > 0:
+                time.sleep(poll_interval)
+        raise RuntimeError(f"Feishu import timed out after {max_polls} polls: ticket={ticket}")
+
+    def import_html_as_docx(
+        self,
+        html_path: Path,
+        title: str,
+        folder_token: Optional[str],
+        poll_interval: float = 2.0,
+        max_polls: int = 30,
+    ) -> Dict[str, Any]:
+        file_token = self.upload_import_source(html_path)
+        ticket = self.create_import_task(file_token, title, folder_token)
+        result = self.poll_import_task(ticket, poll_interval=poll_interval, max_polls=max_polls)
+        return {"file_token": file_token, "ticket": ticket, **result}
 
     def send_card(self, receive_id_type: str, receive_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
         resp = requests.post(
@@ -215,6 +302,7 @@ def main() -> None:
     parser.add_argument("--receive-id", help="Override FEISHU_RECEIVE_ID for the share card target.")
     parser.add_argument("--receive-id-type", help="Override Feishu receive_id_type: chat_id/open_id/user_id/email.")
     parser.add_argument("--env-file", default=".env", help="Dotenv file to load. Defaults to .env.")
+    parser.add_argument("--publish-mode", choices=sorted(PUBLISH_MODES), help="html_import preserves HTML best; docx_blocks is editable but not 1:1.")
     args = parser.parse_args()
 
     load_dotenv(args.env_file, override=False)
@@ -227,15 +315,25 @@ def main() -> None:
     feishu_cfg = config.get("feishu", {})
     dry_run = bool(feishu_cfg.get("dry_run", True))
     generated_at = analysis.get("generated_at") or ""
+    publish_mode = args.publish_mode or feishu_cfg.get("publish_mode", "html_import")
+    if publish_mode not in PUBLISH_MODES:
+        raise RuntimeError(f"Unsupported feishu.publish_mode={publish_mode!r}; expected one of {sorted(PUBLISH_MODES)}")
 
     if dry_run:
         out = Path(args.dry_run_out) if args.dry_run_out else Path(args.html).with_suffix(".feishu_dry_run.json")
         out.parent.mkdir(parents=True, exist_ok=True)
+        import_preview = {
+            "upload": build_import_upload_preview(Path(args.html)),
+            "task": build_import_task_body("DRY_RUN_FILE_TOKEN", title, env_value(feishu_cfg.get("folder_token_env") or "FEISHU_FOLDER_TOKEN"), "html"),
+        }
         out.write_text(
             json.dumps(
                 {
                     "title": title,
                     "html": args.html,
+                    "publish_mode": publish_mode,
+                    "fidelity_note": "html_import uses Feishu's official HTML file import path; docx_blocks is editable but cannot preserve arbitrary HTML/CSS 1:1.",
+                    "import_preview": import_preview,
                     "docx_blocks": blocks,
                     "card_preview": build_share_card(title, "https://feishu.cn/docx/DRY_RUN", generated_at),
                 },
@@ -262,10 +360,21 @@ def main() -> None:
     receive_id_type = args.receive_id_type or feishu_cfg.get("receive_id_type", "chat_id")
 
     publisher = FeishuHtmlPublisher(app_id, app_secret)
-    document_id = publisher.create_docx(title, folder_token)
-    append_result = publisher.append_blocks(document_id, blocks)
-    doc_url = f"https://feishu.cn/docx/{document_id}"
-    result = {"document_id": document_id, "doc_url": doc_url, "append": append_result}
+    if publish_mode == "html_import":
+        import_result = publisher.import_html_as_docx(Path(args.html), title, folder_token)
+        doc_url = import_result.get("url") or f"https://feishu.cn/docx/{import_result.get('token', '')}"
+        result = {"document_id": import_result.get("token"), "doc_url": doc_url, "publish_mode": publish_mode, "import": import_result}
+    else:
+        document_id = publisher.create_docx(title, folder_token)
+        append_result = publisher.append_blocks(document_id, blocks)
+        doc_url = f"https://feishu.cn/docx/{document_id}"
+        result = {
+            "document_id": document_id,
+            "doc_url": doc_url,
+            "publish_mode": publish_mode,
+            "fidelity_warning": "docx_blocks is editable but cannot preserve arbitrary HTML/CSS 1:1. Use html_import for visual fidelity.",
+            "append": append_result,
+        }
     if not args.doc_only:
         result["message"] = publisher.send_card(receive_id_type, str(receive_id), build_share_card(title, doc_url, generated_at))
     else:
