@@ -1,0 +1,247 @@
+# 📊 股市收盘晚报 | {{ date_cn }}（{{ weekday_cn }}）
+
+{% set quotes = analysis.quotes.quotes or {} %}
+{% set primary = config.primary_stock %}
+{% set q = quotes.get(primary.symbol, {}) %}
+{% set macro = analysis.get('macro') or {} %}
+{% set margin_financing = analysis.get('margin_financing') or {} %}
+{% set corporate_actions = analysis.get('corporate_actions') or {} %}
+{% set fund_quality = analysis.fund_flow.quality or {} %}
+{% set news_quality = analysis.news.quality or {} %}
+{% set research_quality = analysis.research.quality or {} %}
+{% set macro_quality = macro.get('quality') or {} %}
+{% set margin_quality = margin_financing.get('quality') or {} %}
+{% set corporate_quality = corporate_actions.get('quality') or {} %}
+{% set sentiment = analysis.get('sentiment') or {} %}
+{% set sentiment_quality = sentiment.get('quality') or {} %}
+{% set summary = analysis.summary or {} %}
+{% set earnings_analysis = analysis.get('earnings_analysis') or {} %}
+
+## 📈 贵州茅台行情
+
+💹 贵州茅台（600519.SH） 收盘：{{ fmt_num(q.get('收盘价'), ' 元', signed=False) }}（{{ fmt_num(q.get('涨跌幅'), '%') }}）
+
+成交额：{{ fmt_num(q.get('成交额（亿）'), ' 亿', signed=False) }} | PE：{{ fmt_num(q.get('PE'), ' 倍', signed=False) }} | 总市值：{{ fmt_num(q.get('总市值（亿）'), ' 亿', signed=False) }}
+
+开盘 {{ fmt_num(q.get('开盘价'), signed=False) }} | 最高 {{ fmt_num(q.get('最高价'), signed=False) }} | 最低 {{ fmt_num(q.get('最低价'), signed=False) }} | 振幅 {{ fmt_num(q.get('振幅'), '%', signed=False) }}
+
+---
+
+## 🍶 白酒板块对比
+
+{% for stock in config.peer_stocks %}
+{{ quote_line(quotes.get(stock.symbol, {}), stock.name) }}
+{% endfor %}
+
+---
+
+## 📰 要闻速览
+
+{% set core_views = analysis.get('core_views') or [] %}
+### 🔴 近 {{ analysis.news.lookback_days or 30 }} 天相关新闻
+
+{% set news_sections = analysis.news.get('sections') or [] %}
+{% if news_sections %}
+{% for section in news_sections %}
+#### {{ section.get('title') }}
+{% set section_items = section.get('items') or [] %}
+{% if section_items %}
+{% for item in section_items %}
+**{{ item.time }}** · **[{{ item.title }}]({{ item.url }})** · {{ item.source }} · 重要性：{{ item.importance or '待评级' }}  
+摘要：{{ item.summary or '待补充' }}  
+
+{% endfor %}
+{% else %}
+{{ section.get('empty') }}
+
+{% endif %}
+{% endfor %}
+{% else %}
+近 {{ analysis.news.lookback_days or 30 }} 天未抓取到相关公开新闻。请使用 Hermes 浏览器工具或授权新闻 API 补充官方公告、行业批价、动销库存、宏观流动性和风险事件。
+{% endif %}
+
+---
+
+## 🎭 市场情绪
+
+### 💰 资金情绪
+
+主力方向：{{ summary.main_inflow_line or '暂缺' }}{{ summary.main_outflow_line or '' }}  
+白酒观察：{{ summary.baijiu_line or '暂缺' }}  
+融资端：{{ summary.margin_financing_line or '暂缺，本轮未取到融资融券数据，不参与判断。' }}  
+大宗交易：{{ summary.block_trade_line or '暂缺。' }}  
+情绪判断：{{ summary.fund_sentiment_line or '样本不足，无法判断。' }}
+
+### 💬 舆论情绪
+
+{% set sentiment_summary = sentiment.get('summary') or {} %}
+{{ sentiment_summary.get('line') or '散户评论样本暂缺，不能给出舆论情绪判断。' }}
+
+{% set sentiment_items = sentiment.get('items') or [] %}
+{% if sentiment_items %}
+{% for item in sentiment_items[:8] %}
+**{{ item.time }}** · **[{{ item.title }}]({{ item.url }})** · {{ item.platform }} · {{ item.sentiment }} · 阅读 {{ item.read_count }} / 回复 {{ item.reply_count }}  
+
+{% endfor %}
+{% else %}
+近 {{ sentiment.get('lookback_days') or 30 }} 天未抓取到可用散户发帖/评论样本。
+{% endif %}
+
+{% set source_status = sentiment.get('source_status') or [] %}
+{% if source_status %}
+数据源状态：{% for status in source_status %}{{ status.source }}={{ status.status }}{% if not loop.last %}；{% endif %}{% endfor %}
+{% endif %}
+
+### 🍶 飞天批价情绪
+
+飞天茅台公开批价暂缺。若抓取到多个公开来源，请给出价格区间，不强行给单点价格。
+
+---
+
+## 🎯 机构观点
+
+{% set research_items = analysis.research.get('items') or [] %}
+{% if research_items %}
+{% for item in research_items[:10] %}
+**{{ item.institution }}** · {{ item.rating or '评级暂缺' }} · {{ item.target_price or '目标价暂缺' }} · {{ item.date or '日期暂缺' }}  
+摘要：{{ item.summary }}
+
+{% endfor %}
+{% else %}
+机构观点暂缺。不得把旧研报冒充最新观点；请接入公开研报摘要或授权研报 API。
+{% endif %}
+
+---
+
+## 📊 板块资金流向 | {{ date_compact }}
+
+含义：超大单、大单、小单表示数据源按成交分档统计后的净买入金额，也就是对应档位买入金额减卖出金额；净流入率 = 净流入 / 成交额。Tushare moneyflow 个股资金流口径：小单为成交额 5 万元以下，中单为 5-20 万元，大单为 20-100 万元，特大单/超大单为成交额 >=100 万元，数据基于主动买卖单统计；行业表由申万二级成分股按上述档位净额加总，不按板块成交或一手金额重新分档。贵州茅台这类一手成交金额已超过小单阈值的高价股，若源数据仍返回小单字段，应理解为数据源基于主动成交明细、拆分撮合或零股/碎片成交归档后的金额桶，不能把其小单字段按普通低价股的散户小买单解读；判断茅台资金情绪时优先看净流入、超大单、大单、成交额、融资融券和大宗交易。若降级到东方财富/同花顺公开板块接口，则采用对应接口自身分档口径，缺失的档位字段会显示“暂缺”。
+
+### 🔥 净流入 TOP 10
+
+排序规则：按“净流入（亿）”从高到低排序。
+
+{{ fund_table(analysis.fund_flow.inflow_top5) }}
+
+📊 分析：净流入 TOP 板块代表今日资金主攻方向，需重点观察超大单和大单是否同向。
+
+### 💧 净流出 TOP 10
+
+排序规则：按“净流入（亿）”从低到高排序。
+
+{{ fund_table(analysis.fund_flow.outflow_top5) }}
+
+📊 分析：净流出 TOP 板块代表今日资金撤离方向，若同时上涨则需警惕拉高派发。
+
+### 🔴 背离一：净流入 ↗ 但股价跌
+
+排序规则：净流入为正、涨跌幅为负，按净流入从高到低排序。
+
+{{ fund_table(analysis.fund_flow.divergence_net_inflow_price_down) }}
+
+📊 分析：可能是压价吸筹，也可能是尾盘承接，需要结合成交额和超大单判断。
+
+### 🟢 背离二：净流出 ↘ 但股价涨
+
+排序规则：净流入为负、涨跌幅为正，按净流入从低到高排序。
+
+{{ fund_table(analysis.fund_flow.divergence_net_outflow_price_up) }}
+
+📊 分析：可能是拉高派发或资金分歧加大，需结合超大单与大单方向判断。
+
+### 🔶 背离三：超大单 ↑ + 大单 ↓
+
+排序规则：超大单为正、大单为负，按超大单从高到低排序。
+
+{{ fund_table(analysis.fund_flow.divergence_super_in_large_out) }}
+
+📊 分析：可能是机构承接、短线资金兑现，说明大资金与中短线资金存在分歧。
+
+### 🔶 背离四：超大单 ↓ + 大单 ↑
+
+排序规则：超大单为负、大单为正，按超大单从低到高排序。
+
+{{ fund_table(analysis.fund_flow.divergence_super_out_large_in) }}
+
+📊 分析：可能是机构减仓、短线资金承接，需警惕后续承压。
+
+---
+
+## 🍶 白酒板块
+
+{{ fund_table(analysis.fund_flow.baijiu) }}
+
+📊 分析：贵州茅台当日收于 {{ fmt_num(q.get('收盘价'), ' 元', signed=False) }}（{{ fmt_num(q.get('涨跌幅'), '%') }}），{{ summary.baijiu_line or '白酒板块资金暂缺。' }}茅台作为高端白酒核心权重，可作为判断板块资金强弱与消费情绪修复的锚点。
+
+---
+
+## 📌 综合研判
+
+{% if core_views %}
+{% for view in core_views %}
+- {{ view }}
+{% endfor %}
+{% else %}
+事实样本不足，暂不输出综合判断。
+{% endif %}
+
+{% if earnings_analysis.get('lines') %}
+---
+
+## 📑 财报深度解读
+
+**[{{ earnings_analysis.get('title') }}]({{ earnings_analysis.get('url') }})** · {{ earnings_analysis.get('date') }}
+
+{% for line in earnings_analysis.get('lines') %}
+- {{ line }}
+{% endfor %}
+
+{% endif %}
+
+---
+
+## 🧾 数据来源与抓取说明
+
+### 数据质量
+
+行情数据：{{ '可用' if q.get('收盘价') else '缺失' }}。  
+板块资金：{{ fund_quality.get('summary') or '暂缺' }}  
+板块资金质量等级：{{ fund_quality.get('level') or 'unknown' }} / {{ fund_quality.get('source_mode') or 'unknown' }}  
+新闻数据：{{ news_quality.get('summary') or '暂缺' }}  
+机构观点：{{ research_quality.get('summary') or '暂缺' }}  
+宏观数据：{{ macro_quality.get('summary') or '暂缺' }}  
+融资融券：{{ margin_quality.get('summary') or '暂缺' }}  
+公司行动：{{ corporate_quality.get('summary') or '暂缺' }}  
+散户舆论：{{ sentiment_quality.get('summary') or '暂缺' }}
+
+### 来源与异常
+
+- 行情数据：{{ analysis.quotes.sources | join('、') if analysis.quotes.sources else '暂缺' }}
+- 资金流数据：{{ analysis.fund_flow.sources | join('、') if analysis.fund_flow.sources else '暂缺' }}
+- 资金流目标日期：{{ fund_quality.target_date or '未指定' }}
+- 资金流实际日期：{{ fund_quality.data_dates | join('、') if fund_quality.data_dates else '暂缺' }}
+- 资金流补充源：{% set supplement_coverage = (analysis.fund_flow.supplements or {}).coverage or [] %}{{ supplement_coverage | map(attribute='source') | join('、') if supplement_coverage else '无' }}
+- 新闻数据：{{ analysis.news.sources | join('、') if analysis.news.sources else '暂缺' }}
+- 机构观点：{{ analysis.research.sources | join('、') if analysis.research.sources else '暂缺' }}
+- 宏观数据：{{ macro.get('sources') | join('、') if macro.get('sources') else '暂缺' }}
+- 融资融券：{{ margin_financing.get('sources') | join('、') if margin_financing.get('sources') else '暂缺' }}
+- 公司行动：{{ corporate_actions.get('sources') | join('、') if corporate_actions.get('sources') else '暂缺' }}
+- 散户舆论：{{ sentiment.get('sources') | join('、') if sentiment.get('sources') else '暂缺' }}
+- 抓取时间：{{ analysis.generated_at }}
+- 行情抓取异常：{{ analysis.quotes.errors | join('；') if analysis.quotes.errors else '无' }}
+- 资金流抓取异常：{{ analysis.fund_flow.errors | join('；') if analysis.fund_flow.errors else '无' }}
+- 资金流降级提示：{{ analysis.fund_flow.warnings | join('；') if analysis.fund_flow.warnings else '无' }}
+- 资金流缺失字段：{{ fund_quality.missing_fields | join('、') if fund_quality.missing_fields else '无' }}
+- 新闻抓取异常：{{ analysis.news.errors | join('；') if analysis.news.errors else '无' }}
+- 机构观点抓取异常：{{ analysis.research.errors | join('；') if analysis.research.errors else '无' }}
+- 宏观抓取异常：{{ macro.get('errors') | join('；') if macro.get('errors') else '无' }}
+- 融资融券抓取异常：{{ margin_financing.get('errors') | join('；') if margin_financing.get('errors') else '无' }}
+- 公司行动抓取异常：{{ corporate_actions.get('errors') | join('；') if corporate_actions.get('errors') else '无' }}
+- 散户舆论抓取异常：{{ sentiment.get('errors') | join('；') if sentiment.get('errors') else '无' }}
+- 说明：若部分网站数据口径不同，本文采用公开来源抓取和脚本统一口径后的结果；缺失字段保留为“暂缺”。
+
+---
+
+## ⚠️ 风险提示
+
+本文仅为公开信息整理与市场观察，不构成任何投资建议。股市有风险，投资需谨慎。

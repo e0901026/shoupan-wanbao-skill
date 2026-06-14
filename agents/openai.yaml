@@ -1,0 +1,6 @@
+interface:
+  display_name: "收盘晚报"
+  short_description: "生成 A 股每日收盘晚报 HTML"
+  default_prompt: "Use $shoupan-wanbao to generate today’s A-share closing report HTML."
+policy:
+  allow_implicit_invocation: true

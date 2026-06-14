@@ -1,0 +1,118 @@
+timezone: Asia/Shanghai
+report_time: "17:30"
+
+primary_stock:
+  name: 贵州茅台
+  symbol: "600519"
+  market: SH
+  secid: "1.600519"
+
+tracked_stocks:
+  - name: 贵州茅台
+    symbol: "600519"
+    market: SH
+    secid: "1.600519"
+    role: primary
+
+peer_stocks:
+  - name: 五粮液
+    symbol: "000858"
+    market: SZ
+    secid: "0.000858"
+  - name: 山西汾酒
+    symbol: "600809"
+    market: SH
+    secid: "1.600809"
+  - name: 泸州老窖
+    symbol: "000568"
+    market: SZ
+    secid: "0.000568"
+  - name: 洋河股份
+    symbol: "002304"
+    market: SZ
+    secid: "0.002304"
+
+fund_flow:
+  source_order:
+    - eastmoney
+    - akshare
+  sector_types:
+    - industry
+  required_columns:
+    - 板块
+    - 净流入（亿）
+    - 超大单（亿）
+    - 大单（亿）
+    - 小单（亿）
+    - 涨跌幅 %
+    - 成交额（亿）
+    - 净流入率 %
+  inflow_outflow_top_n: 10
+  divergence_top_n: 5
+  baijiu_top_n: 5
+  baijiu_keywords:
+    - 白酒
+    - 酿酒
+    - 饮料制造
+    - 高端白酒
+
+news:
+  keywords:
+    - 贵州茅台
+    - 茅台
+    - 飞天茅台
+    - 白酒
+    - 茅台1935
+    - i茅台
+    - 茅台公告
+    - 茅台分红
+    - 茅台批价
+    - 贵州茅台 大宗交易
+    - 600519 大宗交易
+    - 大宗交易
+    - 机构净买入
+    - 机构净卖出
+    - 溢价率
+    - 飞天批价
+    - 白酒板块
+    - 食品饮料
+    - 动销
+    - 库存
+    - 渠道
+    - 五粮液
+    - 山西汾酒
+    - 泸州老窖
+    - 洋河股份
+    - 高端白酒
+    - 消费板块
+    - 社零
+    - 降准
+    - 降息
+    - LPR
+    - 社融
+    - M2
+    - 美联储
+    - CPI
+    - PPI
+    - PMI
+    - 证监会
+    - "600519"
+  max_items: 18
+  per_section: 6
+  lookback_days: 30
+  max_search_keywords: 12
+
+sentiment:
+  lookback_days: 30
+  max_pages: 3
+  max_items: 40
+
+feishu:
+  # 推荐通过环境变量注入密钥，不要写死在配置文件中。
+  app_id_env: FEISHU_APP_ID
+  app_secret_env: FEISHU_APP_SECRET
+  receive_id_env: FEISHU_RECEIVE_ID
+  receive_id_type: chat_id  # chat_id / open_id / user_id / email
+  folder_token_env: FEISHU_FOLDER_TOKEN
+  # true 表示仅生成 HTML 和飞书 dry-run 预览；安装时选择启用飞书发布会改为 false。
+  dry_run: true

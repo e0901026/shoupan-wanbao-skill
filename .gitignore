@@ -1,0 +1,10 @@
+.DS_Store
+.env
+config.yaml
+.venv/
+.deps/
+__pycache__/
+*.pyc
+data/
+output/
+*.feishu_dry_run.json
