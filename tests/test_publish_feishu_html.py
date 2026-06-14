@@ -170,12 +170,6 @@ class PublishFeishuHtmlTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid receive_id"):
             publish_feishu_html.ensure_feishu_ok(response, "send card")
 
-    def test_publish_feishu_v4_compat_entrypoint_exists(self) -> None:
-        wrapper = ROOT / "scripts" / "publish_feishu_v4.py"
-
-        self.assertTrue(wrapper.exists())
-        self.assertIn("publish_feishu_html", wrapper.read_text(encoding="utf-8"))
-
 
 if __name__ == "__main__":
     unittest.main()

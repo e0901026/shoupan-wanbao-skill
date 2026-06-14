@@ -46,7 +46,7 @@ python scripts/run_daily.py --config config.yaml
 
 Default output is HTML only. Use `--publish-feishu` to run the optional Feishu publisher. The publisher defaults to `html_import`, which uploads the final HTML and imports it through Feishu's official file import flow for best visual fidelity. `docx_blocks` is only a downgrade path for editable native blocks and cannot preserve arbitrary HTML/CSS 1:1. Use `--allow-degraded-fund-flow` only for internal drafts.
 
-For Feishu publishing diagnostics, first run `scripts/publish_feishu_html.py --doc-only` to verify document import before sending a share card. `scripts/publish_feishu_v4.py` is a compatibility wrapper for the same implementation. `FEISHU_RECEIVE_ID` must be a real Feishu receive ID matching `receive_id_type`; do not use labels such as "current channel".
+For Feishu publishing diagnostics, first run `scripts/publish_feishu_html.py --doc-only` to verify document import before sending a share card. Keep `scripts/publish_feishu_html.py` as the single Feishu publishing entrypoint. `FEISHU_RECEIVE_ID` must be a real Feishu receive ID matching `receive_id_type`; do not use labels such as "current channel".
 
 ## News Window
 

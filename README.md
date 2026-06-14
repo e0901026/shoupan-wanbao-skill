@@ -92,12 +92,6 @@ python scripts/run_daily.py --config config.yaml --publish-feishu
 python scripts/publish_feishu_html.py --config config.yaml --html output/a_share_evening_report_YYYY-MM-DD.html --analysis data/analysis.json --doc-only
 ```
 
-兼容旧调用名：
-
-```bash
-python scripts/publish_feishu_v4.py --config config.yaml --html output/a_share_evening_report_YYYY-MM-DD.html --analysis data/analysis.json --doc-only
-```
-
 `FEISHU_RECEIVE_ID` 必须是真实的飞书接收 ID，不能写“当前频道”。`receive_id_type` 要与 ID 类型匹配，例如 `chat_id` 通常对应 `oc_...`。脚本会拒绝 `xxx`、`...`、截断 secret 等占位值；飞书返回 400 时会输出响应 body 便于定位。
 
 ## 爬爬乐
