@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -72,6 +73,29 @@ class PublishFeishuHtmlTest(unittest.TestCase):
             self.assertEqual(payload["title"], "A股收盘晚报")
             self.assertEqual(payload["docx_blocks"][0]["block_type"], "heading1")
             self.assertIn("分享卡片", payload["card_preview"]["elements"][0]["text"]["content"])
+
+    def test_validate_env_value_rejects_placeholders_and_truncated_values(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "FEISHU_APP_SECRET"):
+            publish_feishu_html.validate_env_value("FEISHU_APP_SECRET", "abc...")
+
+        with self.assertRaisesRegex(RuntimeError, "FEISHU_RECEIVE_ID"):
+            publish_feishu_html.validate_env_value("FEISHU_RECEIVE_ID", "oc_xxx")
+
+    def test_required_env_names_skip_receive_id_for_doc_only(self) -> None:
+        self.assertEqual(
+            publish_feishu_html.required_env_names(doc_only=True),
+            ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+        )
+        self.assertIn("FEISHU_RECEIVE_ID", publish_feishu_html.required_env_names(doc_only=False))
+
+    def test_feishu_http_error_includes_response_body(self) -> None:
+        response = requests.Response()
+        response.status_code = 400
+        response._content = b'{"code":999,"msg":"invalid receive_id"}'
+        response.url = "https://open.feishu.cn/open-apis/im/v1/messages"
+
+        with self.assertRaisesRegex(RuntimeError, "invalid receive_id"):
+            publish_feishu_html.ensure_feishu_ok(response, "send card")
 
 
 if __name__ == "__main__":

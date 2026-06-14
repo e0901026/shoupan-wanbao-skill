@@ -12,8 +12,64 @@ from dotenv import load_dotenv
 from common import env_value, load_yaml, read_json
 
 
+FEISHU_APP_ENV = ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]
+FEISHU_SEND_ENV = ["FEISHU_RECEIVE_ID"]
+
+
 def clean_text(value: str) -> str:
     return " ".join((value or "").split())
+
+
+def mask_value(value: str | None) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-2:]}"
+
+
+def looks_like_placeholder(value: str | None) -> bool:
+    text = (value or "").strip()
+    lowered = text.lower()
+    if not text:
+        return True
+    if lowered in {"xxx", "x", "your_tushare_token", "your_token", "none", "null"}:
+        return True
+    if "..." in text or "…" in text:
+        return True
+    if lowered.endswith("_xxx") or lowered in {"cli_xxx", "oc_xxx"}:
+        return True
+    return False
+
+
+def validate_env_value(name: str, value: str | None) -> str:
+    if looks_like_placeholder(value):
+        raise RuntimeError(
+            f"{name} 缺失、仍是占位符或疑似截断值（当前值预览：{mask_value(value)}）。"
+            "请通过环境变量或 .env 提供完整真实值，不能写入 Git 仓库。"
+        )
+    return str(value).strip()
+
+
+def required_env_names(doc_only: bool = False) -> List[str]:
+    names = list(FEISHU_APP_ENV)
+    if not doc_only:
+        names.extend(FEISHU_SEND_ENV)
+    return names
+
+
+def ensure_feishu_ok(resp: requests.Response, action: str) -> Dict[str, Any]:
+    body = resp.text[:2000]
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Feishu API {action} HTTP {resp.status_code}: {body}")
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Feishu API {action} returned non-JSON body: {body}") from exc
+    code = data.get("code")
+    if code not in (0, None):
+        raise RuntimeError(f"Feishu API {action} business error: {json.dumps(data, ensure_ascii=False)}")
+    return data
 
 
 def html_title(soup: BeautifulSoup, fallback: str = "A股收盘晚报") -> str:
@@ -92,8 +148,7 @@ class FeishuHtmlPublisher:
             json={"app_id": self.app_id, "app_secret": self.app_secret},
             timeout=20,
         )
-        resp.raise_for_status()
-        data = resp.json()
+        data = ensure_feishu_ok(resp, "tenant_access_token")
         token = data.get("tenant_access_token")
         if not token:
             raise RuntimeError(f"Feishu token missing: {data}")
@@ -108,8 +163,7 @@ class FeishuHtmlPublisher:
         if folder_token:
             body["folder_token"] = folder_token
         resp = requests.post(f"{self.base}/docx/v1/documents", headers=self.headers(), json=body, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+        data = ensure_feishu_ok(resp, "create docx")
         document = (data.get("data") or {}).get("document") or {}
         token = document.get("document_id") or (data.get("data") or {}).get("document_id")
         if not token:
@@ -126,8 +180,7 @@ class FeishuHtmlPublisher:
             json={"children": children[:300]},
             timeout=30,
         )
-        resp.raise_for_status()
-        return resp.json()
+        return ensure_feishu_ok(resp, "append docx blocks")
 
     def send_card(self, receive_id_type: str, receive_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
         resp = requests.post(
@@ -137,8 +190,7 @@ class FeishuHtmlPublisher:
             json={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
             timeout=20,
         )
-        resp.raise_for_status()
-        return resp.json()
+        return ensure_feishu_ok(resp, "send card")
 
 
 def build_share_card(title: str, doc_url: str, generated_at: str) -> Dict[str, Any]:
@@ -159,9 +211,13 @@ def main() -> None:
     parser.add_argument("--html", required=True)
     parser.add_argument("--analysis", required=True)
     parser.add_argument("--dry-run-out", help="Where to write dry-run preview JSON.")
+    parser.add_argument("--doc-only", action="store_true", help="Create/update Feishu doc only; do not send share card.")
+    parser.add_argument("--receive-id", help="Override FEISHU_RECEIVE_ID for the share card target.")
+    parser.add_argument("--receive-id-type", help="Override Feishu receive_id_type: chat_id/open_id/user_id/email.")
+    parser.add_argument("--env-file", default=".env", help="Dotenv file to load. Defaults to .env.")
     args = parser.parse_args()
 
-    load_dotenv()
+    load_dotenv(args.env_file, override=False)
     config = load_yaml(args.config)
     html_text = Path(args.html).read_text(encoding="utf-8")
     analysis = read_json(args.analysis, default={}) or {}
@@ -191,20 +247,30 @@ def main() -> None:
         print(f"dry_run=true，已写入：{out}")
         return
 
-    app_id = env_value(feishu_cfg.get("app_id_env"))
-    app_secret = env_value(feishu_cfg.get("app_secret_env"))
-    receive_id = env_value(feishu_cfg.get("receive_id_env"))
-    folder_token = env_value(feishu_cfg.get("folder_token_env"))
-    receive_id_type = feishu_cfg.get("receive_id_type", "chat_id")
-    if not app_id or not app_secret or not receive_id:
-        raise RuntimeError("缺少飞书环境变量：FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_RECEIVE_ID")
+    app_id_env = feishu_cfg.get("app_id_env") or "FEISHU_APP_ID"
+    app_secret_env = feishu_cfg.get("app_secret_env") or "FEISHU_APP_SECRET"
+    receive_id_env = feishu_cfg.get("receive_id_env") or "FEISHU_RECEIVE_ID"
+    folder_token_env = feishu_cfg.get("folder_token_env") or "FEISHU_FOLDER_TOKEN"
+    app_id = validate_env_value(app_id_env, env_value(app_id_env))
+    app_secret = validate_env_value(app_secret_env, env_value(app_secret_env))
+    receive_id = args.receive_id or env_value(receive_id_env)
+    if not args.doc_only:
+        receive_id = validate_env_value(receive_id_env, receive_id)
+    folder_token = env_value(folder_token_env)
+    if folder_token and looks_like_placeholder(folder_token):
+        folder_token = None
+    receive_id_type = args.receive_id_type or feishu_cfg.get("receive_id_type", "chat_id")
 
     publisher = FeishuHtmlPublisher(app_id, app_secret)
     document_id = publisher.create_docx(title, folder_token)
     append_result = publisher.append_blocks(document_id, blocks)
     doc_url = f"https://feishu.cn/docx/{document_id}"
-    card_result = publisher.send_card(receive_id_type, receive_id, build_share_card(title, doc_url, generated_at))
-    print(json.dumps({"document_id": document_id, "doc_url": doc_url, "append": append_result, "message": card_result}, ensure_ascii=False, indent=2))
+    result = {"document_id": document_id, "doc_url": doc_url, "append": append_result}
+    if not args.doc_only:
+        result["message"] = publisher.send_card(receive_id_type, str(receive_id), build_share_card(title, doc_url, generated_at))
+    else:
+        result["message"] = "doc_only=true，已跳过分享卡片发送。"
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

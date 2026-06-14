@@ -85,6 +85,14 @@ python scripts/run_daily.py --config config.yaml --publish-feishu
 
 默认 `feishu.dry_run: true` 时不会调用真实飞书 API，只会生成 `.feishu_dry_run.json` 预览。
 
+如果只想先验证 HTML 能否转换为飞书文档，不发送分享卡片：
+
+```bash
+python scripts/publish_feishu_html.py --config config.yaml --html output/a_share_evening_report_YYYY-MM-DD.html --analysis data/analysis.json --doc-only
+```
+
+`FEISHU_RECEIVE_ID` 必须是真实的飞书接收 ID，不能写“当前频道”。`receive_id_type` 要与 ID 类型匹配，例如 `chat_id` 通常对应 `oc_...`。脚本会拒绝 `xxx`、`...`、截断 secret 等占位值；飞书返回 400 时会输出响应 body 便于定位。
+
 ## 爬爬乐
 
 本 skill 依赖爬爬乐作为通用抓取层。运行环境已安装 `$pa-pa-le` 时优先使用它；没有安装时可参考 `references/pa-pa-le.md`。

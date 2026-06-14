@@ -46,6 +46,8 @@ python scripts/run_daily.py --config config.yaml
 
 Default output is HTML only. Use `--publish-feishu` to run the optional HTML-to-Feishu-doc publisher. Use `--allow-degraded-fund-flow` only for internal drafts.
 
+For Feishu publishing diagnostics, first run `scripts/publish_feishu_html.py --doc-only` to verify document creation and HTML conversion before sending a share card. `FEISHU_RECEIVE_ID` must be a real Feishu receive ID matching `receive_id_type`; do not use labels such as "current channel".
+
 ## News Window
 
 Use `scripts/run_daily.py` as the canonical entrypoint:
