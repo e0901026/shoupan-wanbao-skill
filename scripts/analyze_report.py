@@ -691,6 +691,86 @@ def build_core_views(analysis: Dict[str, Any]) -> List[str]:
     return views[:7]
 
 
+def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    quotes = analysis.get("quotes") or {}
+    fund_flow = analysis.get("fund_flow") or {}
+    macro = analysis.get("macro") or {}
+    summary = analysis.get("summary") or {}
+    primary = (quotes.get("quotes") or {}).get("600519", {})
+    baijiu_rows_ = fund_flow.get("baijiu") or []
+    baijiu = first_row_named(baijiu_rows_, "白酒Ⅱ") or (baijiu_rows_[0] if baijiu_rows_ else {})
+    moutai_row = first_row_named(baijiu_rows_, "贵州茅台")
+    inflow_top = (fund_flow.get("inflow_top5") or [])[:3]
+
+    lines: List[str] = []
+    pct = to_float(primary.get("涨跌幅"))
+    close = to_float(primary.get("收盘价"))
+    open_price = to_float(primary.get("开盘价"))
+    high = to_float(primary.get("最高价"))
+    low = to_float(primary.get("最低价"))
+    amount = to_float(primary.get("成交额（亿）"))
+    if pct is not None and close is not None:
+        direction = "下跌" if pct < 0 else "上涨" if pct > 0 else "平盘"
+        lines.append(
+            f"结论：今日贵州茅台{direction}{fmt_signed(pct, '%')}，收于{close:.2f}元；"
+            "核心不是单一新闻冲击，而是技术承压、白酒资金分歧和成长板块吸金共同作用。"
+        )
+    tech_parts = []
+    if open_price is not None and high is not None and low is not None and close is not None:
+        tech_parts.append(f"日内开盘{open_price:.2f}、最高{high:.2f}、最低{low:.2f}、收盘{close:.2f}")
+        if close < open_price:
+            tech_parts.append("收盘低于开盘，说明盘中承接不足")
+        if high == open_price:
+            tech_parts.append("最高价贴近开盘价，反弹弹性偏弱")
+    if amount is not None:
+        tech_parts.append(f"成交额{amount:.2f}亿元")
+    if tech_parts:
+        lines.append("技术面：" + "；".join(tech_parts) + "。")
+
+    fund_parts = []
+    if moutai_row:
+        fund_parts.append(
+            "贵州茅台净流入{net}，超大单{super_large}，大单{large}，小单{small}".format(
+                net=fmt_signed(moutai_row.get("净流入（亿）"), "亿"),
+                super_large=fmt_signed(moutai_row.get("超大单（亿）"), "亿"),
+                large=fmt_signed(moutai_row.get("大单（亿）"), "亿"),
+                small=fmt_signed(moutai_row.get("小单（亿）"), "亿"),
+            )
+        )
+    if baijiu:
+        fund_parts.append(
+            "{name}净流入{net}、涨跌幅{pct}".format(
+                name=baijiu.get("板块", "白酒Ⅱ"),
+                net=fmt_signed(baijiu.get("净流入（亿）"), "亿"),
+                pct=fmt_signed(baijiu.get("涨跌幅 %"), "%"),
+            )
+        )
+    if inflow_top:
+        leader_text = "、".join(f"{row.get('板块')} {fmt_signed(row.get('净流入（亿）'), '亿')}" for row in inflow_top)
+        fund_parts.append(f"资金主攻方向集中在{leader_text}")
+    if fund_parts:
+        lines.append("资金流动面：" + "；".join(fund_parts) + "。")
+
+    macro_items = macro.get("items") or []
+    macro_parts = []
+    for item in macro_items:
+        title = str(item.get("title") or "")
+        summary_text = str(item.get("summary") or "")
+        if any(key in title + summary_text for key in ["FOMC", "10年期国债", "PCE", "非农", "CPI", "PPI"]):
+            macro_parts.append(summary_text or title)
+        if len(macro_parts) >= 2:
+            break
+    if not macro_parts:
+        macro_parts.append("宏观事件窗口暂以已抓取的利率、汇率与风险事件为准，缺数据时不强行编造。")
+    lines.append("宏观消息面：" + "；".join(macro_parts) + "。")
+
+    fund_sentiment = summary.get("fund_sentiment_line")
+    if fund_sentiment:
+        lines.append(f"大作手式判断：先看资金，再看叙事。今日资金情绪为“{fund_sentiment}”，短线应等待资金背离收敛或白酒Ⅱ重新获得净流入确认。")
+
+    return {"title": "今日复盘：今日下跌的核心原因", "lines": lines}
+
+
 def build_earnings_deep_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
     earnings = ((analysis.get("corporate_actions") or {}).get("earnings") or {})
     report = earnings.get("latest_report") or {}
@@ -883,6 +963,7 @@ def main() -> None:
     }
     analysis["earnings_analysis"] = build_earnings_deep_analysis(analysis)
     analysis["core_views"] = build_core_views(analysis)
+    analysis["daily_review"] = build_daily_review(analysis)
     write_json(args.out, analysis)
 
 

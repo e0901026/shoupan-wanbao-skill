@@ -35,6 +35,18 @@
 
 ---
 
+{% set daily_review = analysis.get('daily_review') or {} %}
+{% if daily_review.get('lines') %}
+## 🧭 {{ daily_review.get('title') or '今日复盘' }}
+
+{% for line in daily_review.get('lines') %}
+- {{ line }}
+{% endfor %}
+
+---
+
+{% endif %}
+
 ## 📰 要闻速览
 
 {% set core_views = analysis.get('core_views') or [] %}

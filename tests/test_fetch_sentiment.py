@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime as real_datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -80,6 +81,49 @@ class FetchSentimentTest(unittest.TestCase):
         self.assertEqual(summary["counts"]["负向"], 1)
         self.assertEqual(summary["counts"]["正向"], 1)
         self.assertNotIn("中金", summary["evidence_text"])
+
+    def test_build_retail_sentiment_summary_includes_social_posts(self) -> None:
+        items = [
+            {
+                "title": "贵州茅台扛不住了",
+                "sentiment": "负向",
+                "platform": "今日头条",
+                "source_type": "retail_social_post",
+            },
+            {
+                "title": "贵州茅台支撑很稳",
+                "sentiment": "正向",
+                "platform": "东方财富股吧",
+                "source_type": "retail_forum_post",
+            },
+        ]
+
+        summary = fetch_sentiment.build_retail_sentiment_summary(items)
+
+        self.assertEqual(summary["sample_count"], 2)
+        self.assertEqual(summary["platform_counts"], {"今日头条": 1, "东方财富股吧": 1})
+
+    def test_parse_toutiao_posts_pairs_content_with_relative_time(self) -> None:
+        html = """
+        <a href="/search/jump?url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F1">全文 过去信白酒价值能穿越周期，现在周期早已转向科技，贵州茅台只会越扛越亏。</a>
+        <a href="/search/jump?url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F1_time">7小时前</a>
+        <a href="/search/jump?url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F2">全文 贵州茅台回购股票意味着公司觉得股票被低估。</a>
+        <a href="/search/jump?url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F2_time">5小时前</a>
+        <a href="/search/jump?url=https%3A%2F%2Ftoutiao.com%2Fgroup%2F3">贵州茅台 (600519) 上证</a>
+        <a>今天</a>
+        """
+
+        with patch("fetch_sentiment.datetime") as fake_datetime:
+            fake_datetime.now.return_value = real_datetime(2026, 6, 15, 18, 0)
+            fake_datetime.strptime.side_effect = real_datetime.strptime
+            items = fetch_sentiment.parse_toutiao_posts(html, keyword="贵州茅台", target_date="2026-06-15", lookback_days=1)
+
+        self.assertEqual([item["platform"] for item in items], ["今日头条", "今日头条"])
+        self.assertEqual(items[0]["time"], "2026-06-15 13:00")
+        self.assertEqual(items[0]["sentiment"], "正向")
+        self.assertEqual(items[1]["sentiment"], "负向")
+        self.assertTrue(items[0]["url"].startswith("https://toutiao.com/") or items[0]["url"].startswith("https://weitoutiao.zjurl.cn/"))
+        self.assertNotIn("600519", [item["title"] for item in items])
 
     def test_main_writes_sentiment_payload_from_eastmoney(self) -> None:
         html = """

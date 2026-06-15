@@ -47,6 +47,7 @@ class RenderReportTest(unittest.TestCase):
                         },
                         "news": {"sources": [], "items": []},
                         "research": {"sources": [], "items": []},
+                        "daily_review": {"title": "今日复盘：测试", "lines": ["技术面：测试复盘。"]},
                         "fund_flow": {
                             "sources": ["test"],
                             "inflow_top5": [],
@@ -82,6 +83,8 @@ class RenderReportTest(unittest.TestCase):
 
             report = out_path.read_text(encoding="utf-8")
             self.assertIn("股市收盘晚报 | 2026年06月12日（周五）", report)
+            self.assertLess(report.index("## 🧭 今日复盘：测试"), report.index("## 📰 要闻速览"))
+            self.assertIn("- 技术面：测试复盘。", report)
             self.assertIn("五粮液", report)
             self.assertIn("小单（亿）", report)
             self.assertIn("超大单、大单、小单表示数据源按成交分档统计后的净买入金额", report)

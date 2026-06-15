@@ -279,6 +279,50 @@ class FetchSectorFundFlowTest(unittest.TestCase):
         self.assertEqual(len(rows), 128)
         self.assertEqual(calls, [1, 2])
 
+    def test_eastmoney_page_falls_back_to_delay_host_when_primary_fails(self) -> None:
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, host: str) -> None:
+                self.host = host
+
+            def raise_for_status(self) -> None:
+                if self.host == "push2.eastmoney.com":
+                    raise requests.HTTPError("502 Bad Gateway")
+
+            def json(self) -> dict:
+                return {
+                    "data": {
+                        "total": 1,
+                        "diff": [
+                            {
+                                "f14": "半导体",
+                                "f12": "BK1036",
+                                "f62": 16343425024.0,
+                                "f66": 13516902400.0,
+                                "f72": 2826522624.0,
+                                "f84": -4086112768.0,
+                                "f3": 6.06,
+                                "f6": 400901433900.0,
+                                "f184": 4.08,
+                                "f124": 1781509187,
+                            }
+                        ],
+                    }
+                }
+
+        def fake_get(url: str, **kwargs):
+            host = url.split("/")[2]
+            calls.append(host)
+            return FakeResponse(host)
+
+        with patch.object(fetch_sector_fund_flow, "eastmoney_get", side_effect=fake_get):
+            rows, total = fetch_sector_fund_flow.fetch_eastmoney_sector_page_once("m:90 s:4", 1)
+
+        self.assertEqual(calls, ["push2.eastmoney.com", "push2delay.eastmoney.com"])
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["f14"], "半导体")
+
     def test_main_respects_configured_industry_only_sector_type(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

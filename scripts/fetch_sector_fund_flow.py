@@ -16,6 +16,7 @@ EASTMONEY_SECTOR_FS = {
     "industry": "m:90 s:4",
     "concept": "m:90 t:3",
 }
+EASTMONEY_CLIST_HOSTS = ["push2.eastmoney.com", "push2delay.eastmoney.com"]
 EASTMONEY_PAGE_SIZE = 100
 
 
@@ -75,7 +76,6 @@ def collect_eastmoney_pages(fetch_page) -> List[Dict[str, Any]]:
 
 
 def fetch_eastmoney_sector_page_once(fs: str, page: int) -> tuple[List[Dict[str, Any]], int | None]:
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": page,
         "pz": EASTMONEY_PAGE_SIZE,
@@ -90,25 +90,26 @@ def fetch_eastmoney_sector_page_once(fs: str, page: int) -> tuple[List[Dict[str,
         "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
     }
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/bkzj/"}
-    try:
-        from curl_cffi import requests as curl_requests
-
-        resp = curl_requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=20,
-            impersonate="chrome120",
-            proxies={"http": "", "https": ""},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        resp = market_session().get(url, params=params, headers=headers, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+    last_exc: Exception | None = None
+    for host in EASTMONEY_CLIST_HOSTS:
+        url = f"https://{host}/api/qt/clist/get"
+        try:
+            resp = eastmoney_get(url, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    else:
+        if last_exc:
+            raise last_exc
+        return [], None
     payload = data.get("data") or {}
     return payload.get("diff") or [], payload.get("total")
+
+
+def eastmoney_get(url: str, **kwargs):
+    return market_session().get(url, **kwargs)
 
 
 def fetch_eastmoney_sector_page(fs: str, page: int, retries: int = 3) -> tuple[List[Dict[str, Any]], int | None]:
