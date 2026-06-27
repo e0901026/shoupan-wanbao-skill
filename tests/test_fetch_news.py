@@ -311,6 +311,10 @@ class FetchNewsTest(unittest.TestCase):
         self.assertEqual(items[0]["importance"], "高")
         self.assertTrue(items[0]["url"].startswith("https://www.sse.com.cn/"))
 
+    def test_lookback_start_for_date_limits_daily_official_news_window(self) -> None:
+        self.assertEqual(fetch_news.lookback_start_for_date("2026-06-16", 4), "2026-06-13")
+        self.assertEqual(fetch_news.lookback_start_for_date("2026-06-16", 30), "2026-05-18")
+
 
 if __name__ == "__main__":
     unittest.main()

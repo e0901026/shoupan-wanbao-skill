@@ -129,9 +129,29 @@ class AnalyzeReportTest(unittest.TestCase):
         )
 
         issue_types = {issue["type"] for issue in issues}
+        self.assertIn("fund_flow_main_net_mismatch", issue_types)
         self.assertIn("fund_flow_net_exceeds_amount", issue_types)
         self.assertIn("fund_flow_rate_mismatch", issue_types)
         self.assertIn("baijiu_table_empty", issue_types)
+
+    def test_fund_flow_sanity_accepts_main_net_equal_super_large_plus_large(self) -> None:
+        issues = analyze_report.fund_flow_sanity_issues(
+            [],
+            [
+                {
+                    "板块": "贵州茅台",
+                    "净流入（亿）": -0.58,
+                    "超大单（亿）": 0.85,
+                    "大单（亿）": -1.43,
+                    "小单（亿）": -0.01,
+                    "涨跌幅 %": -1.21,
+                    "成交额（亿）": 44.0,
+                    "净流入率 %": -1.32,
+                }
+            ],
+        )
+
+        self.assertEqual(issues, [])
 
     def test_normalize_fund_flow_quality_expands_tushare_bucket_definition(self) -> None:
         sector = {
@@ -285,8 +305,9 @@ class AnalyzeReportTest(unittest.TestCase):
                     "大单（亿）": 0.05,
                     "小单（亿）": -0.02,
                     "涨跌幅 %": 1.01,
-                    "成交额（亿）": 48.0,
+                    "成交额（亿）": None,
                     "净流入率 %": 0.4,
+                    "板块代码": "600519.SH",
                     "sector_type": "stock_as_sector",
                 }
             ]
@@ -303,7 +324,23 @@ class AnalyzeReportTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            for name in ["quotes", "news", "research"]:
+            (data_dir / "quotes.json").write_text(
+                json.dumps(
+                    {
+                        "quotes": {
+                            "600519": {
+                                "股票名称": "贵州茅台",
+                                "股票代码": "600519",
+                                "涨跌幅": 1.01,
+                                "成交额（亿）": 48.0,
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            for name in ["news", "research"]:
                 (data_dir / f"{name}.json").write_text("{}", encoding="utf-8")
 
             with patch.object(
@@ -324,6 +361,7 @@ class AnalyzeReportTest(unittest.TestCase):
             analysis = json.loads(out_path.read_text(encoding="utf-8"))
             fund_flow = analysis["fund_flow"]
             self.assertEqual([row["板块"] for row in fund_flow["baijiu"]], ["白酒Ⅱ", "贵州茅台"])
+            self.assertEqual(fund_flow["baijiu"][1]["成交额（亿）"], 48.0)
             self.assertNotIn("贵州茅台", [row["板块"] for row in fund_flow["inflow_top5"]])
             self.assertIn("tushare.moneyflow.stock", fund_flow["stock_sources"])
 

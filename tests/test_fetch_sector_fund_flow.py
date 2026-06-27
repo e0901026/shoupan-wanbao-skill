@@ -32,10 +32,10 @@ class FetchSectorFundFlowTest(unittest.TestCase):
             "industry",
         )
 
-        self.assertEqual(row["净流入（亿）"], 0.0)
+        self.assertEqual(row["净流入（亿）"], -0.0023)
         self.assertEqual(row["超大单（亿）"], 0.02)
-        self.assertEqual(row["大单（亿）"], -0.02)
-        self.assertEqual(row["小单（亿）"], -0.01)
+        self.assertEqual(row["大单（亿）"], -0.0223)
+        self.assertEqual(row["小单（亿）"], -0.005)
         self.assertEqual(row["成交额（亿）"], 1.27)
         self.assertEqual(row["数据日期"], "2026-06-12")
 
@@ -101,13 +101,13 @@ class FetchSectorFundFlowTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["板块"], "半导体")
-        self.assertEqual(row["净流入（亿）"], 0.05)
-        self.assertEqual(row["超大单（亿）"], 0.04)
-        self.assertEqual(row["大单（亿）"], 0.01)
-        self.assertEqual(row["小单（亿）"], 0.0)
-        self.assertEqual(row["中单（亿）"], 0.0)
+        self.assertEqual(row["净流入（亿）"], 0.052)
+        self.assertEqual(row["超大单（亿）"], 0.037)
+        self.assertEqual(row["大单（亿）"], 0.015)
+        self.assertEqual(row["小单（亿）"], 0.003)
+        self.assertEqual(row["中单（亿）"], 0.002)
         self.assertEqual(row["成交额（亿）"], 3.0)
-        self.assertEqual(row["净流入率 %"], 1.67)
+        self.assertEqual(row["净流入率 %"], 1.73)
         self.assertEqual(row["涨跌幅 %"], 0.0)
         self.assertEqual(row["数据日期"], "2026-06-12")
         self.assertEqual(row["source"], "tushare.moneyflow.sw2_aggregate")
@@ -136,13 +136,58 @@ class FetchSectorFundFlowTest(unittest.TestCase):
         self.assertEqual(row["净流入（亿）"], 0.09)
         self.assertEqual(row["超大单（亿）"], 0.06)
         self.assertEqual(row["大单（亿）"], 0.03)
-        self.assertEqual(row["中单（亿）"], 0.0)
+        self.assertEqual(row["中单（亿）"], 0.004)
         self.assertEqual(row["小单（亿）"], -0.02)
         self.assertEqual(row["涨跌幅 %"], 1.01)
         self.assertEqual(row["成交额（亿）"], 5.0)
         self.assertEqual(row["净流入率 %"], 1.8)
         self.assertEqual(row["sector_type"], "stock_as_sector")
         self.assertEqual(row["source"], "tushare.moneyflow.stock")
+
+    def test_build_tushare_stock_moneyflow_row_uses_large_plus_elg_as_main_net(self) -> None:
+        row = fetch_sector_fund_flow.build_tushare_stock_moneyflow_row(
+            {"name": "贵州茅台", "symbol": "600519", "market": "SH"},
+            {
+                "ts_code": "600519.SH",
+                "trade_date": "20260616",
+                "buy_sm_amount": 59.51,
+                "sell_sm_amount": 158.92,
+                "buy_md_amount": 258432.04,
+                "sell_md_amount": 252541.64,
+                "buy_lg_amount": 112942.64,
+                "sell_lg_amount": 127245.31,
+                "buy_elg_amount": 68561.56,
+                "sell_elg_amount": 60049.89,
+                "net_mf_amount": -93460.84,
+            },
+            {"ts_code": "600519.SH", "trade_date": "20260616", "pct_chg": -1.21, "amount": 4400000.0},
+            "2026-06-16",
+        )
+
+        self.assertEqual(row["超大单（亿）"], 0.8512)
+        self.assertEqual(row["大单（亿）"], -1.4303)
+        self.assertEqual(row["小单（亿）"], -0.0099)
+        self.assertEqual(row["净流入（亿）"], -0.5791)
+        self.assertEqual(row["净流入率 %"], -1.32)
+        self.assertEqual(row["Tushare原始净流入（亿）"], -9.3461)
+        self.assertIn("主力净流入=超大单净额+大单净额", row["净流入口径"])
+
+    def test_parse_eastmoney_stock_fflow_kline_treats_stock_as_sector(self) -> None:
+        row = fetch_sector_fund_flow.parse_eastmoney_stock_fflow_kline(
+            "2026-06-16,-544577072.0,-138353.0,544715424.0,-237836432.0,-306740640.0,-12.38,-0.00,12.38,-5.41,-6.97,1255.67,-1.21",
+            {"name": "贵州茅台", "symbol": "600519", "market": "SH"},
+            "2026-06-16",
+        )
+
+        self.assertEqual(row["板块"], "贵州茅台")
+        self.assertEqual(row["净流入（亿）"], -5.4458)
+        self.assertEqual(row["超大单（亿）"], -3.0674)
+        self.assertEqual(row["大单（亿）"], -2.3784)
+        self.assertEqual(row["中单（亿）"], 5.4472)
+        self.assertEqual(row["小单（亿）"], -0.0014)
+        self.assertEqual(row["涨跌幅 %"], -1.21)
+        self.assertEqual(row["净流入率 %"], -12.38)
+        self.assertEqual(row["source"], "eastmoney.stock.fflow.daykline")
 
     def test_parse_ths_sector_rows_to_required_schema(self) -> None:
         html = """
@@ -464,6 +509,63 @@ class FetchSectorFundFlowTest(unittest.TestCase):
             self.assertEqual(payload["sources"], ["tushare.moneyflow.sw2_aggregate"])
             self.assertEqual(payload["quality"]["source_mode"], "tushare_sw2_stock_moneyflow_aggregate")
             self.assertIn("eastmoney returned non-target-date data", "；".join(payload["warnings"]))
+
+    def test_main_falls_back_to_eastmoney_stock_moneyflow_when_tushare_stock_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "config.yaml"
+            out_path = tmp_path / "sector.json"
+            config_path.write_text(
+                "primary_stock:\n  name: 贵州茅台\n  symbol: '600519'\n  market: SH\n  secid: '1.600519'\nfund_flow:\n  sector_types:\n    - industry\n",
+                encoding="utf-8",
+            )
+            eastmoney_rows = [
+                {
+                    "板块": "白酒Ⅱ",
+                    "净流入（亿）": -2.94,
+                    "超大单（亿）": -1.0,
+                    "大单（亿）": -1.94,
+                    "小单（亿）": 1.0,
+                    "涨跌幅 %": -1.14,
+                    "成交额（亿）": 80.0,
+                    "净流入率 %": -3.68,
+                    "数据日期": "2026-06-16",
+                    "source": "eastmoney.push2.clist.sw2_fund_flow",
+                }
+            ]
+            fallback_stock = [
+                {
+                    "板块": "贵州茅台",
+                    "净流入（亿）": -5.45,
+                    "超大单（亿）": -3.07,
+                    "大单（亿）": -2.38,
+                    "小单（亿）": 0.0,
+                    "涨跌幅 %": -1.21,
+                    "成交额（亿）": None,
+                    "净流入率 %": -12.38,
+                    "source": "eastmoney.stock.fflow.daykline",
+                }
+            ]
+
+            with (
+                patch.dict("os.environ", {"TUSHARE_TOKEN": "token"}),
+                patch.object(
+                    sys,
+                    "argv",
+                    ["fetch_sector_fund_flow.py", "--config", str(config_path), "--out", str(out_path), "--date", "2026-06-16"],
+                ),
+                patch.object(fetch_sector_fund_flow, "fetch_eastmoney_sector", return_value=eastmoney_rows),
+                patch.object(fetch_sector_fund_flow, "fetch_tushare_stock_moneyflow", return_value=[]),
+                patch.object(fetch_sector_fund_flow, "fetch_eastmoney_stock_moneyflow", return_value=fallback_stock),
+                patch.object(fetch_sector_fund_flow, "build_supplements", return_value=({"coverage": []}, [])),
+            ):
+                fetch_sector_fund_flow.main()
+
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["stock_sources"], ["eastmoney.stock.fflow.daykline"])
+            self.assertEqual(payload["stock_rows"][0]["板块"], "贵州茅台")
+            self.assertIn("tushare primary stock moneyflow returned no rows", "；".join(payload["warnings"]))
+            self.assertIn("eastmoney fallback", "；".join(payload["warnings"]))
 
 
 if __name__ == "__main__":

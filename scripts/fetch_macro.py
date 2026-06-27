@@ -17,6 +17,12 @@ BLS_RELEASE_SCHEDULE_URL = "https://www.bls.gov/schedule/news_release/current_ye
 BLS_EMPLOYMENT_SCHEDULE_URL = "https://www.bls.gov/schedule/news_release/empsit.htm"
 BLS_CPI_URL = "https://www.bls.gov/news.release/cpi.nr0.htm"
 BEA_PCE_URL = "https://www.bea.gov/data/personal-consumption-expenditures-price-index"
+BOJ_POLICY_RELEASE_URL = "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260616a.pdf"
+BOJ_RELEASES_2026_URL = "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/index.htm"
+XINHUA_US_IRAN_URL = "https://www.news.cn/world/20260615/9f8b392a794447dc835714fcacc0cc97/c.html"
+FTSE_CHINA_A50_REVIEW_URL = "https://www.lseg.com/en/media-centre/press-releases/ftse-russell/2026/ftse-china-index-series-quarterly-review-q2-2026"
+SSE_CLOSING_AUCTION_URL = "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20180806_4607055.shtml"
+SSE_HOLIDAY_2026_URL = "https://www.sse.com.cn/disclosure/dealinstruc/closed/"
 
 FOMC_2026_MEETINGS = [
     ("2026-01-27", "2026-01-28"),
@@ -30,6 +36,13 @@ FOMC_2026_MEETINGS = [
 ]
 
 MACRO_EVENT_CALENDAR_2026 = [
+    {
+        "date": "2026-06-16",
+        "name": "日本央行6月货币政策会议 / 日元利率路径",
+        "source": "Bank of Japan",
+        "url": BOJ_RELEASES_2026_URL,
+        "why": "日本央行利率和购债节奏会影响日元套息交易、全球流动性和亚洲风险资产资金偏好。",
+    },
     {
         "date": "2026-06-25",
         "name": "美国5月PCE / 个人收入与支出",
@@ -58,6 +71,45 @@ MACRO_EVENT_CALENDAR_2026 = [
         "url": BLS_RELEASE_SCHEDULE_URL,
         "why": "PPI 影响成本通胀预期，并可能通过美债利率传导到全球风险偏好。",
     },
+]
+
+GEOPOLITICAL_RISK_EVENTS_2026 = [
+    {
+        "date": "2026-06-15",
+        "title": "美伊确认达成协议，油价回落但谈判执行仍有不确定性",
+        "source": "新华网",
+        "url": XINHUA_US_IRAN_URL,
+        "summary": (
+            "美国和伊朗确认达成协议，霍尔木兹海峡预计重新开放，国际油价显著下跌；"
+            "短线有利于缓和通胀和避险情绪，但协议签署、排雷、航运恢复和后续核问题谈判仍会影响油价、美元、美债和全球风险偏好。"
+        ),
+        "impact_direction": "待观察",
+        "impact_targets": ["A股市场", "全球市场"],
+        "impact_period": "短期（1-5天）",
+        "importance": "高",
+    }
+]
+
+MARKET_STRUCTURE_EVENTS_2026 = [
+    {
+        "published_date": "2026-06-03",
+        "effective_date": "2026-06-18",
+        "title": "富时中国A50调仓叠加收盘集合竞价，尾盘机械性卖压需单独识别",
+        "source": "LSEG / FTSE Russell / 上海证券交易所",
+        "url": FTSE_CHINA_A50_REVIEW_URL,
+        "summary": (
+            "LSEG/FTSE Russell 公布富时中国A50指数6月季度审核，调整于2026-06-22开盘生效；"
+            "新纳入兆易创新、澜起科技、东山精密、胜宏科技、潍柴动力等。A股14:57-15:00为收盘集合竞价，"
+            "该阶段可以申报、不可撤单。对贵州茅台这类权重股，若调仓后目标权重下降，被动资金可能在收盘附近卖出腾挪资金，"
+            "叠加2026-06-19至2026-06-21端午休市，2026-06-18作为节前最后交易日更可能承接被动调仓和降低敞口交易；"
+            "尾盘跳低应优先识别为指数调仓和集合竞价造成的机械性卖压，而不是直接归因于单一机构恶意砸盘。"
+        ),
+        "impact_direction": "利空",
+        "impact_targets": ["贵州茅台", "A股市场"],
+        "impact_period": "短期（1-5天）",
+        "importance": "高",
+        "source_urls": [FTSE_CHINA_A50_REVIEW_URL, SSE_CLOSING_AUCTION_URL, SSE_HOLIDAY_2026_URL],
+    }
 ]
 
 
@@ -135,6 +187,85 @@ def upcoming_macro_events(target_date: str | None, horizon_days: int = 45) -> Li
     return out
 
 
+def target_date_obj(target_date: str | None):
+    if not target_date:
+        return None
+    return datetime.strptime(target_date, "%Y-%m-%d").date()
+
+
+def build_boj_policy_item(target_date: str | None) -> Dict[str, Any] | None:
+    target = target_date_obj(target_date)
+    event_date = datetime.strptime("2026-06-16", "%Y-%m-%d").date()
+    if target is None:
+        return None
+    delta = (event_date - target).days
+    if delta > 45 or delta < -5:
+        return None
+    if target < event_date:
+        title = "日本央行6月会议窗口：日元利率与购债节奏将影响全球资金"
+        summary = (
+            "日本央行6月会议临近，市场需前瞻关注日元政策利率、基础贷款利率和JGB购买计划；"
+            "若日元利率上行或购债收缩，可能推高日元资金成本、扰动套息交易，并通过全球流动性影响A股风险偏好。"
+        )
+        direction = "待观察"
+    else:
+        title = "日本央行加息：日元政策利率上调至1.0%，全球流动性压力需跟踪"
+        summary = (
+            "日本央行6月15-16日会议决定改变货币市场操作指引，互补存款便利利率上调至1.0%，"
+            "基础贷款利率为1.25%，新利率自2026-06-17生效。对A股而言，这不是白酒基本面事件，"
+            "但会通过日元融资成本、套息交易平仓、全球债券收益率和风险偏好影响资金流向。"
+        )
+        direction = "利空"
+    return enrich_news_item(
+        {
+            "title": title,
+            "source": "Bank of Japan",
+            "time": "2026-06-16",
+            "url": BOJ_POLICY_RELEASE_URL,
+            "category": "宏观与风险事件",
+            "summary": summary,
+            "impact_direction": direction,
+            "impact_targets": ["A股市场", "全球市场"],
+            "impact_period": "中期（1-3个月）",
+            "importance": "高",
+        }
+    )
+
+
+def build_geopolitical_risk_items(target_date: str | None, lookback_days: int = 5) -> List[Dict[str, Any]]:
+    target = target_date_obj(target_date)
+    if target is None:
+        return []
+    out = []
+    for event in GEOPOLITICAL_RISK_EVENTS_2026:
+        event_dt = datetime.strptime(event["date"], "%Y-%m-%d").date()
+        delta = (target - event_dt).days
+        if 0 <= delta < lookback_days:
+            out.append(enrich_news_item({**event, "time": event["date"], "category": "宏观与风险事件"}))
+    return out
+
+
+def build_market_structure_items(target_date: str | None) -> List[Dict[str, Any]]:
+    target = target_date_obj(target_date)
+    if target is None:
+        return []
+    out = []
+    for event in MARKET_STRUCTURE_EVENTS_2026:
+        published_dt = datetime.strptime(event["published_date"], "%Y-%m-%d").date()
+        effective_dt = datetime.strptime(event["effective_date"], "%Y-%m-%d").date()
+        if published_dt <= target <= effective_dt:
+            out.append(
+                enrich_news_item(
+                    {
+                        **event,
+                        "time": event["effective_date"],
+                        "category": "宏观与风险事件",
+                    }
+                )
+            )
+    return out
+
+
 def fmt_percent(value: Any) -> str:
     if value is None:
         return "暂缺"
@@ -166,7 +297,7 @@ def build_macro_items(h15: Dict[str, Any], target_date: str | None) -> List[Dict
     rate_path_summary = (
         f"截至 {event_date} 可见的官方 H.15 最新日度数据为 {latest_date}："
         f"有效联邦基金利率 {effr}，{meeting_text}"
-        "6 月会议前应跟踪加息/维持高利率预期，而不是把它写成已加息。"
+        "应持续跟踪下一次 FOMC 前的加息、降息或维持高利率预期，而不是把市场预期写成已发生的政策动作。"
     )
     treasury_summary = (
         f"美国 10 年期国债收益率 {ten_year}，较上一观察日 {ten_year_change}；"
@@ -177,7 +308,7 @@ def build_macro_items(h15: Dict[str, Any], target_date: str | None) -> List[Dict
     items = [
         enrich_news_item(
             {
-                "title": "美联储利率路径观察：6月FOMC前关注加息/高利率预期",
+                "title": "美联储利率路径观察：关注下一次FOMC与高利率预期",
                 "source": "Federal Reserve H.15 / FOMC Calendar",
                 "time": event_date,
                 "url": FED_FOMC_CALENDAR_URL,
@@ -190,6 +321,14 @@ def build_macro_items(h15: Dict[str, Any], target_date: str | None) -> List[Dict
             }
         )
     ]
+
+    items.extend(build_market_structure_items(target_date))
+
+    boj_item = build_boj_policy_item(target_date)
+    if boj_item:
+        items.append(boj_item)
+
+    items.extend(build_geopolitical_risk_items(target_date))
 
     if h15.get("treasury_10y_year") is not None:
         items.append(
@@ -242,8 +381,8 @@ def build_quality(items: List[Dict[str, Any]], errors: List[str]) -> Dict[str, A
     if items:
         return {
             "level": "ok",
-            "source_mode": "federal_reserve_h15",
-            "summary": f"宏观利率与未来事件数据可用，已生成 {len(items)} 条美联储/美债/数据窗口事件。",
+            "source_mode": "macro_policy_and_risk_events",
+            "summary": f"宏观利率、日元利率与地缘风险数据可用，已生成 {len(items)} 条宏观/风险事件。",
             "item_count": len(items),
         }
     return {
@@ -276,6 +415,12 @@ def main() -> None:
         sources.append("Federal Reserve FOMC Calendar")
     if any("未来宏观数据窗口" in item.get("title", "") for item in items):
         sources.extend(["Bureau of Labor Statistics", "U.S. Bureau of Economic Analysis"])
+    if any("日本央行" in item.get("title", "") for item in items):
+        sources.append("Bank of Japan")
+    if any("美伊" in item.get("title", "") for item in items):
+        sources.append("新华网")
+    if any("富时中国A50" in item.get("title", "") for item in items):
+        sources.extend(["LSEG / FTSE Russell", "上海证券交易所"])
     sources = list(dict.fromkeys(sources))
 
     write_json(

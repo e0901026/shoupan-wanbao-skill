@@ -24,7 +24,7 @@ def eastmoney_yuan_to_yi(value: Any) -> float | None:
     n = to_float(value)
     if n is None:
         return None
-    return round(n / 100000000, 2)
+    return round(n / 100000000, 4)
 
 
 def eastmoney_timestamp(value: Any) -> tuple[str | None, str | None]:
@@ -238,14 +238,14 @@ def wan_to_yi(value: Any) -> float | None:
     n = to_float(value)
     if n is None:
         return None
-    return round(n / 10000, 2)
+    return round(n / 10000, 4)
 
 
 def qian_yuan_to_yi(value: Any) -> float | None:
     n = to_float(value)
     if n is None:
         return None
-    return round(n / 100000, 2)
+    return round(n / 100000, 4)
 
 
 def active_sw_member_rows(member_rows: List[Dict[str, Any]], trade_date: str) -> List[Dict[str, Any]]:
@@ -309,13 +309,15 @@ def aggregate_tushare_sw2_moneyflow(
     merged["中单净额_万元"] = merged["buy_md_amount"] - merged["sell_md_amount"]
     merged["大单净额_万元"] = merged["buy_lg_amount"] - merged["sell_lg_amount"]
     merged["超大单净额_万元"] = merged["buy_elg_amount"] - merged["sell_elg_amount"]
+    merged["主力净额_万元"] = merged["大单净额_万元"] + merged["超大单净额_万元"]
     merged["成交额_千元"] = merged["amount"]
     merged["涨跌幅加权分子"] = merged["pct_chg"] * merged["成交额_千元"]
 
     grouped = (
         merged.groupby(["l2_code", "l2_name"], as_index=False)
         .agg(
-            净流入_万元=("net_mf_amount", "sum"),
+            净流入_万元=("主力净额_万元", "sum"),
+            Tushare原始净流入_万元=("net_mf_amount", "sum"),
             超大单_万元=("超大单净额_万元", "sum"),
             大单_万元=("大单净额_万元", "sum"),
             中单_万元=("中单净额_万元", "sum"),
@@ -350,6 +352,7 @@ def aggregate_tushare_sw2_moneyflow(
                 "涨跌幅 %": pct,
                 "成交额（亿）": amount_yi,
                 "净流入率 %": rate,
+                "Tushare原始净流入（亿）": wan_to_yi(item.get("Tushare原始净流入_万元")),
                 "板块代码": item.get("l2_code"),
                 "成分股数量": int(item.get("成分股数量") or 0),
                 "数据日期": display_date(trade_date),
@@ -372,7 +375,11 @@ def build_tushare_stock_moneyflow_row(
     trade_date: str,
 ) -> Dict[str, Any]:
     daily_row = daily_row or {}
-    net_yi = wan_to_yi(moneyflow_row.get("net_mf_amount"))
+    super_large_wan = (to_float(moneyflow_row.get("buy_elg_amount")) or 0) - (to_float(moneyflow_row.get("sell_elg_amount")) or 0)
+    large_wan = (to_float(moneyflow_row.get("buy_lg_amount")) or 0) - (to_float(moneyflow_row.get("sell_lg_amount")) or 0)
+    medium_wan = (to_float(moneyflow_row.get("buy_md_amount")) or 0) - (to_float(moneyflow_row.get("sell_md_amount")) or 0)
+    small_wan = (to_float(moneyflow_row.get("buy_sm_amount")) or 0) - (to_float(moneyflow_row.get("sell_sm_amount")) or 0)
+    net_yi = wan_to_yi(super_large_wan + large_wan)
     amount_yi = qian_yuan_to_yi(daily_row.get("amount"))
     rate = None
     if net_yi is not None and amount_yi not in (None, 0):
@@ -380,18 +387,77 @@ def build_tushare_stock_moneyflow_row(
     return {
         "板块": stock.get("name") or stock.get("symbol"),
         "净流入（亿）": net_yi,
-        "超大单（亿）": wan_to_yi((to_float(moneyflow_row.get("buy_elg_amount")) or 0) - (to_float(moneyflow_row.get("sell_elg_amount")) or 0)),
-        "大单（亿）": wan_to_yi((to_float(moneyflow_row.get("buy_lg_amount")) or 0) - (to_float(moneyflow_row.get("sell_lg_amount")) or 0)),
-        "中单（亿）": wan_to_yi((to_float(moneyflow_row.get("buy_md_amount")) or 0) - (to_float(moneyflow_row.get("sell_md_amount")) or 0)),
-        "小单（亿）": wan_to_yi((to_float(moneyflow_row.get("buy_sm_amount")) or 0) - (to_float(moneyflow_row.get("sell_sm_amount")) or 0)),
+        "超大单（亿）": wan_to_yi(super_large_wan),
+        "大单（亿）": wan_to_yi(large_wan),
+        "中单（亿）": wan_to_yi(medium_wan),
+        "小单（亿）": wan_to_yi(small_wan),
         "涨跌幅 %": round(to_float(daily_row.get("pct_chg")) or 0, 2) if daily_row.get("pct_chg") is not None else None,
         "成交额（亿）": amount_yi,
         "净流入率 %": rate,
+        "Tushare原始净流入（亿）": wan_to_yi(moneyflow_row.get("net_mf_amount")),
+        "净流入口径": "主力净流入=超大单净额+大单净额；Tushare net_mf_amount 仅保留为原始字段。",
         "板块代码": ts_code_for_stock(stock),
         "数据日期": display_date(trade_date),
         "sector_type": "stock_as_sector",
         "source": "tushare.moneyflow.stock",
     }
+
+
+def parse_eastmoney_stock_fflow_kline(kline: str, stock: Dict[str, Any], trade_date: str) -> Dict[str, Any]:
+    parts = kline.split(",")
+    if len(parts) < 13:
+        raise ValueError(f"unexpected eastmoney stock fflow kline fields: {kline}")
+    item_date = parts[0]
+    if item_date != trade_date:
+        raise ValueError(f"eastmoney stock fflow date mismatch: target={trade_date}, data={item_date}")
+    net_yi = eastmoney_yuan_to_yi(parts[1])
+    return {
+        "板块": stock.get("name") or stock.get("symbol"),
+        "净流入（亿）": net_yi,
+        "超大单（亿）": eastmoney_yuan_to_yi(parts[5]),
+        "大单（亿）": eastmoney_yuan_to_yi(parts[4]),
+        "中单（亿）": eastmoney_yuan_to_yi(parts[3]),
+        "小单（亿）": eastmoney_yuan_to_yi(parts[2]),
+        "涨跌幅 %": to_float(parts[12]),
+        "成交额（亿）": None,
+        "净流入率 %": to_float(parts[6]),
+        "板块代码": ts_code_for_stock(stock),
+        "数据日期": item_date,
+        "sector_type": "stock_as_sector",
+        "source": "eastmoney.stock.fflow.daykline",
+    }
+
+
+def fetch_eastmoney_stock_moneyflow(trade_date: str, stock: Dict[str, Any]) -> List[Dict[str, Any]]:
+    secid = stock.get("secid")
+    if not secid:
+        market_prefix = "1" if stock.get("market") == "SH" else "0"
+        secid = f"{market_prefix}.{stock['symbol']}"
+    params = {
+        "lmt": "0",
+        "klt": "101",
+        "secid": secid,
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63",
+    }
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+    last_exc: Exception | None = None
+    for host in EASTMONEY_CLIST_HOSTS:
+        url = f"https://{host}/api/qt/stock/fflow/daykline/get"
+        try:
+            resp = eastmoney_get(url, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            klines = (data.get("data") or {}).get("klines") or []
+            for kline in reversed(klines):
+                if str(kline).startswith(f"{trade_date},"):
+                    return [parse_eastmoney_stock_fflow_kline(str(kline), stock, trade_date)]
+            return []
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    return []
 
 
 def fetch_tushare_stock_moneyflow(trade_date: str, token: str, stock: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -564,7 +630,7 @@ def assess_fund_flow_quality(
             "level": "complete",
             "source_mode": "tushare_sw2_stock_moneyflow_aggregate",
             "missing_fields": [],
-            "summary": "申万二级行业资金流由 Tushare moneyflow 个股资金流按申万二级成分股聚合；Tushare 金额分档为小单<5万元、中单5-20万元、大单20-100万元、特大单/超大单>=100万元，基于主动买卖单统计；行业表按成分股档位净额加总。",
+            "summary": "申万二级行业资金流由 Tushare moneyflow 个股资金流按申万二级成分股聚合；净流入统一为主力净流入=超大单净额+大单净额；Tushare 金额分档为小单<5万元、中单5-20万元、大单20-100万元、特大单/超大单>=100万元，基于主动买卖单统计；行业表按成分股档位净额加总。",
             "target_date": target_date,
             "data_dates": clean_dates,
         }
@@ -574,7 +640,7 @@ def assess_fund_flow_quality(
         if any("eastmoney.push2.clist.sw2_fund_flow" in source for source in sources)
         else ("eastmoney_full" if any("eastmoney" in source for source in sources) else "complete"),
         "missing_fields": [],
-        "summary": "申万二级行业资金流数据包含净流入、超大单、大单、小单、涨跌幅、成交额、净流入率。",
+        "summary": "申万二级行业资金流数据包含净流入、超大单、大单、小单、涨跌幅、成交额、净流入率；净流入统一按主力净流入理解，即超大单净额+大单净额。",
         "target_date": target_date,
         "data_dates": clean_dates,
     }
@@ -623,10 +689,19 @@ def main() -> None:
     if args.date and tushare_token and primary_stock:
         try:
             raw_stock_rows.extend(fetch_tushare_stock_moneyflow(args.date, tushare_token, primary_stock))
+            if not raw_stock_rows:
+                warnings.append("tushare primary stock moneyflow returned no rows")
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"tushare primary stock moneyflow failed: {exc}")
     elif args.date and primary_stock:
         warnings.append("tushare primary stock moneyflow skipped: TUSHARE_TOKEN not set")
+    if args.date and primary_stock and not raw_stock_rows:
+        try:
+            raw_stock_rows.extend(fetch_eastmoney_stock_moneyflow(args.date, primary_stock))
+            if raw_stock_rows:
+                warnings.append("primary stock moneyflow used eastmoney fallback; 成交额字段可能暂缺")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"eastmoney primary stock moneyflow fallback failed: {exc}")
 
     if not raw_rows:
         try:

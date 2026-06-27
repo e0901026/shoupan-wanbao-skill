@@ -139,6 +139,18 @@ class RunDailyTest(unittest.TestCase):
         self.assertIn("--html", publish_cmd)
         self.assertIn("output/a_share_evening_report_2026-06-12.html", publish_cmd)
 
+    def test_archive_daily_artifacts_copies_analysis_by_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            (data_dir / "analysis.json").write_text(json.dumps({"summary": "ok"}, ensure_ascii=False), encoding="utf-8")
+
+            run_daily.archive_daily_artifacts("2026-06-12", data_dir=data_dir)
+
+            archived = data_dir / "archive" / "analysis_2026-06-12.json"
+            self.assertTrue(archived.exists())
+            self.assertEqual(json.loads(archived.read_text(encoding="utf-8"))["summary"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

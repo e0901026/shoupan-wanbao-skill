@@ -1,6 +1,14 @@
 timezone: Asia/Shanghai
 report_time: "17:30"
 
+report_center:
+  scheduler: launchd
+  daily_time: "16:00"
+  weekly_time: "09:00"
+  monday_morning_time: "08:30"
+  pdf_mode: on_demand
+  index_output: output/index.html
+
 primary_stock:
   name: 贵州茅台
   symbol: "600519"

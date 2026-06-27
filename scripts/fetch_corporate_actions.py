@@ -161,6 +161,15 @@ def parse_dividend_record(item: Dict[str, Any], text: str) -> Dict[str, Any]:
     record_date = parse_cn_date((re.search(r"股权登记日[:：]?\s*([0-9 年月日/-]+)", clean) or [None, None])[1])
     ex_date = parse_cn_date((re.search(r"(?:除权（息）日|除权除息日)[:：]?\s*([0-9 年月日/-]+)", clean) or [None, None])[1])
     payment_date = parse_cn_date((re.search(r"现金红利发放日[:：]?\s*([0-9 年月日/-]+)", clean) or [None, None])[1])
+    if not (record_date and ex_date and payment_date):
+        table_row = re.search(
+            r"[ＡA]股\s+(\d{4}/\d{1,2}/\d{1,2})\s+(?:－|-|--)?\s*(\d{4}/\d{1,2}/\d{1,2})\s+(\d{4}/\d{1,2}/\d{1,2})",
+            clean,
+        )
+        if table_row:
+            record_date = record_date or parse_cn_date(table_row.group(1))
+            ex_date = ex_date or parse_cn_date(table_row.group(2))
+            payment_date = payment_date or parse_cn_date(table_row.group(3))
 
     if "实施公告" in title or record_date or ex_date or payment_date:
         status = "实施公告已披露"

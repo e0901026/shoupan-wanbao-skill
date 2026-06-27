@@ -1,0 +1,6 @@
+interface:
+  display_name: "收盘周报"
+  short_description: "从每日收盘晚报生成 A 股周报分析"
+  default_prompt: "Use $shoupan-zhoubao to generate the weekly A-share report from completed daily closing reports."
+policy:
+  allow_implicit_invocation: true

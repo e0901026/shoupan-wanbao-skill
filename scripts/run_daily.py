@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -28,6 +29,15 @@ def write_state(path: str | Path, state: dict) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+def archive_daily_artifacts(report_date: str, data_dir: str | Path = "data") -> None:
+    data_path = Path(data_dir)
+    archive_dir = data_path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    analysis = data_path / "analysis.json"
+    if analysis.exists():
+        shutil.copy2(analysis, archive_dir / f"analysis_{report_date}.json")
+
+
 def compute_news_lookback_days(report_date: str, state_file: str | Path, initial_days: int = 30) -> int:
     state = read_state(state_file)
     last_date = state.get("last_successful_report_date")
@@ -52,6 +62,7 @@ def main() -> None:
         help="Allow degraded fund-flow sources for internal drafts. Default is strict complete fund-flow validation.",
     )
     parser.add_argument("--no-html", action="store_true", help="Skip HTML export.")
+    parser.add_argument("--no-index", action="store_true", help="Skip refreshing output/index.html after generation.")
     args = parser.parse_args()
 
     py = sys.executable
@@ -104,8 +115,11 @@ def main() -> None:
         )
     if args.publish_feishu:
         commands.append([py, "scripts/publish_feishu_html.py", "--config", args.config, "--html", html_out, "--analysis", "data/analysis.json"])
+    if not args.no_index:
+        commands.append([py, "scripts/render_index.py", "--output-dir", "output"])
     for cmd in commands:
         run(cmd)
+    archive_daily_artifacts(report_date)
     state = read_state(args.state_file)
     state.update(
         {

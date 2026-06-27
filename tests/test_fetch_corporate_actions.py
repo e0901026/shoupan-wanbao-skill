@@ -26,6 +26,16 @@ DIVIDEND_MEETING_TEXT = """
 股东会授权董事会制定 2026 年中期利润分配方案并组织实施。
 """
 
+DIVIDEND_IMPLEMENTATION_TEXT = """
+贵州茅台酒股份有限公司 2025年年度权益分派实施公告
+重要内容提示：
+每股分配比例 A 股每股现金红利28.02423元
+相关日期 股份类别 股权登记日 最后交易日 除权（息） 日 现金红利发放日
+Ａ股 2026/6/25 － 2026/6/26 2026/6/26
+本次利润分配以方案实施前的公司总股本扣除回购专用账户内的股份1,250,081,601股为基数，
+每股派发现金红利28.02423元（含税），共计派发现金红利35,032,574,305.19元。
+"""
+
 BUYBACK_TEXT = """
 关于股份回购实施结果暨股份变动的公告
 回购方案首次披露日 2025/11/6
@@ -88,6 +98,21 @@ class FetchCorporateActionsTest(unittest.TestCase):
         self.assertEqual(buyback["completion_date"], "2026-05-27")
         self.assertEqual(buyback["cancel_date"], "2026-05-28")
         self.assertIn("注销并减少注册资本", buyback["line"])
+
+    def test_parse_dividend_implementation_table_dates(self) -> None:
+        dividend = fetch_corporate_actions.parse_dividend_record(
+            {
+                "title": "贵州茅台2025年年度权益分派实施公告",
+                "time": "2026-06-22",
+                "url": "https://example.com/dividend.pdf",
+            },
+            DIVIDEND_IMPLEMENTATION_TEXT,
+        )
+
+        self.assertEqual(dividend["record_date"], "2026-06-25")
+        self.assertEqual(dividend["ex_dividend_date"], "2026-06-26")
+        self.assertEqual(dividend["cash_payment_date"], "2026-06-26")
+        self.assertIn("持股至股权登记日可享有本次现金分红", dividend["action"])
 
     def test_parse_earnings_report_triggers_deep_analysis_only_near_report_date(self) -> None:
         item = {

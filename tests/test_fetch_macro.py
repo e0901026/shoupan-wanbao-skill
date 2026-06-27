@@ -45,21 +45,62 @@ class FetchMacroTest(unittest.TestCase):
             "2026-06-12",
         )
 
-        self.assertEqual(len(items), 3)
+        self.assertGreaterEqual(len(items), 4)
         self.assertTrue(all(item["category"] == "宏观与风险事件" for item in items))
-        self.assertIn("6月FOMC", items[0]["title"])
-        self.assertIn("10 年期国债收益率 4.45%", items[1]["summary"])
+        self.assertIn("下一次FOMC", items[0]["title"])
+        self.assertTrue(any("10 年期国债收益率 4.45%" in item["summary"] for item in items))
         self.assertIn("2026-06-16", items[0]["summary"])
-        self.assertIn("未来宏观数据窗口", items[2]["title"])
-        self.assertIn("2026-06-25 美国5月PCE", items[2]["summary"])
-        self.assertIn("2026-07-02 美国6月非农就业", items[2]["summary"])
-        self.assertIn("A股资金流向", items[2]["summary"])
+        future = next(item for item in items if "未来宏观数据窗口" in item["title"])
+        self.assertIn("2026-06-16 日本央行6月货币政策会议", future["summary"])
+        self.assertIn("2026-06-25 美国5月PCE", future["summary"])
+        self.assertIn("2026-07-02 美国6月非农就业", future["summary"])
+        self.assertIn("A股资金流向", future["summary"])
+
+    def test_build_macro_items_includes_boj_and_us_iran_risk_on_target_date(self) -> None:
+        items = fetch_macro.build_macro_items(
+            {
+                "latest_date": "2026 Jun 12",
+                "effective_federal_funds_rate": 3.62,
+                "treasury_10y_year": 4.48,
+                "treasury_10y_year_change_bp": 3.0,
+            },
+            "2026-06-16",
+        )
+
+        titles = [item["title"] for item in items]
+        self.assertTrue(any("日本央行加息" in title for title in titles))
+        self.assertTrue(any("美伊确认达成协议" in title for title in titles))
+        boj = next(item for item in items if "日本央行加息" in item["title"])
+        self.assertIn("1.0%", boj["summary"])
+        self.assertIn("日元融资成本", boj["summary"])
+        us_iran = next(item for item in items if "美伊确认达成协议" in item["title"])
+        self.assertIn("油价", us_iran["summary"])
+        self.assertIn("风险偏好", us_iran["summary"])
+
+    def test_build_macro_items_includes_ftse_a50_rebalance_on_effective_date(self) -> None:
+        items = fetch_macro.build_macro_items(
+            {
+                "latest_date": "2026 Jun 18",
+                "effective_federal_funds_rate": 3.62,
+                "treasury_10y_year": 4.43,
+                "treasury_10y_year_change_bp": -4.0,
+            },
+            "2026-06-18",
+        )
+
+        event = next(item for item in items if "富时中国A50调仓" in item["title"])
+        self.assertIn("2026-06-22开盘生效", event["summary"])
+        self.assertIn("收盘集合竞价", event["summary"])
+        self.assertIn("机械性卖压", event["summary"])
+        self.assertIn("端午休市", event["summary"])
+        self.assertIn("兆易创新", event["summary"])
 
     def test_build_macro_items_keeps_future_events_even_when_h15_is_missing(self) -> None:
         items = fetch_macro.build_macro_items({}, "2026-06-12")
 
         titles = [item["title"] for item in items]
         self.assertIn("未来宏观数据窗口：PCE、非农、CPI/PPI将影响资金流向", titles)
+        self.assertIn("日本央行6月会议窗口：日元利率与购债节奏将影响全球资金", titles)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ output/a_share_evening_report_YYYY-MM-DD.html
 ```
 
 `output/report.md` 和 `data/analysis.json` 是中间产物，供调试、飞书发布或其它 agent 复用。
+成功生成日报后会归档 `data/archive/analysis_YYYY-MM-DD.json`，供周报分析复用。
 
 ## 安装
 
@@ -54,6 +55,50 @@ python scripts/run_daily.py --config config.yaml
 
 ```bash
 python scripts/run_daily.py --config config.yaml --allow-degraded-fund-flow
+```
+
+## 报告中心与定时任务
+
+报告中心只做调度和导航，不改变收盘晚报与周报 HTML 交付件的正文形式。
+
+统一入口：
+
+```bash
+python scripts/run_report_center.py --config config.yaml
+```
+
+默认行为：
+
+- 交易日 16:00 后：补跑缺失交易日并生成当日收盘晚报。
+- 周六 09:00 后：读取本周日报归档，生成周报。
+- 周一 08:30 后：生成开盘早报，整理上次收盘后到周一盘前的休市资讯。
+- 每次运行后刷新 `output/index.html`，导航到开盘早报、收盘晚报和周报 HTML。
+
+安装向导可生成本机 macOS `launchd` plist：
+
+```bash
+python scripts/install.py --no-prompt --schedule-dry-run
+python scripts/install.py --no-prompt --install-schedule
+```
+
+`--schedule-dry-run` 只打印 plist；`--install-schedule` 只写入 plist 文件，不自动 `launchctl load`。
+
+手动生成周报：
+
+```bash
+python scripts/run_weekly.py --root . --dates 2026-06-22 2026-06-23 2026-06-24 2026-06-25 2026-06-26
+```
+
+手动生成导航页：
+
+```bash
+python scripts/render_index.py --output-dir output
+```
+
+按需导出 PDF：
+
+```bash
+python scripts/export_pdf.py --html output/a_share_evening_report_YYYY-MM-DD.html
 ```
 
 ## 新闻窗口

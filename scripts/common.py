@@ -138,6 +138,8 @@ def normalize_fund_row(row: Dict[str, Any]) -> Dict[str, Any]:
                     break
 
     # f62/f66/f72/f6 是东方财富接口里的“元”，转换为亿元。
+    # 内部保留 4 位小数，避免小额板块在两位展示精度下变成 -0.00，
+    # 导致净流入率和主力净流入一致性校验误判；渲染层再统一显示两位。
     for col in ["净流入（亿）", "超大单（亿）", "大单（亿）", "小单（亿）", "成交额（亿）"]:
         raw = values[col]
         if raw is None:
@@ -146,9 +148,9 @@ def normalize_fund_row(row: Dict[str, Any]) -> Dict[str, Any]:
         if n is None:
             values[col] = None
         elif abs(n) > 1000000:  # 认为是“元”口径
-            values[col] = round(n / 100000000.0, 2)
+            values[col] = round(n / 100000000.0, 4)
         else:
-            values[col] = round(n, 2)
+            values[col] = round(n, 4)
 
     for col in ["涨跌幅 %", "净流入率 %"]:
         values[col] = round_or_none(values[col], 2)

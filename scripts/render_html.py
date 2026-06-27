@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import List
 
+from report_html_utils import ensure_pdf_export_link
+
 
 STYLE = """
 body {
@@ -164,11 +166,13 @@ def render_with_pandoc(report: Path, out: Path, title: str) -> None:
         ],
         check=True,
     )
+    ensure_pdf_export_link(out)
 
 
 def write_fallback_html(report: Path, out: Path, title: str) -> None:
     markdown_text = report.read_text(encoding="utf-8")
     out.write_text(fallback_markdown_to_html(markdown_text, title), encoding="utf-8")
+    ensure_pdf_export_link(out)
 
 
 def default_title(report: Path) -> str:

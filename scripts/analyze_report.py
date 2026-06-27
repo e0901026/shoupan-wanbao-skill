@@ -103,6 +103,27 @@ def baijiu_rows(rows: List[Dict[str, Any]], keywords: List[str]) -> List[Dict[st
     return hits
 
 
+def enrich_stock_rows_with_quotes(stock_rows: List[Dict[str, Any]], quotes: Dict[str, Any]) -> List[Dict[str, Any]]:
+    quote_rows = quotes.get("quotes") or {}
+    enriched = []
+    for row in stock_rows:
+        out = dict(row)
+        raw_code = str(out.get("板块代码") or out.get("股票代码") or "")
+        code6 = raw_code[:6] if raw_code else ""
+        quote = quote_rows.get(code6) or {}
+        if to_float(out.get("成交额（亿）")) is None and to_float(quote.get("成交额（亿）")) is not None:
+            out["成交额（亿）"] = quote.get("成交额（亿）")
+        if to_float(out.get("涨跌幅 %")) is None and to_float(quote.get("涨跌幅")) is not None:
+            out["涨跌幅 %"] = quote.get("涨跌幅")
+        if to_float(out.get("净流入率 %")) is None:
+            net = to_float(out.get("净流入（亿）"))
+            amount = to_float(out.get("成交额（亿）"))
+            if net is not None and amount and amount > 0:
+                out["净流入率 %"] = round(net / amount * 100, 2)
+        enriched.append(out)
+    return enriched
+
+
 def parse_date_prefix(value: Any) -> datetime | None:
     match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
     if not match:
@@ -211,7 +232,7 @@ def merge_macro_events_into_news(news: Dict[str, Any], macro: Dict[str, Any], co
     merged["sources"] = sources
     quality = dict(news.get("quality") or {})
     quality["item_count"] = len(merged_items)
-    quality["summary"] = f"新闻数据可用，已合并 {len(macro_items)} 条美联储/美债宏观事件，并保留 {len(merged_items)} 条近一个月相关公开信息。"
+    quality["summary"] = f"新闻数据可用，已合并 {len(macro_items)} 条宏观利率/地缘风险事件，并保留 {len(merged_items)} 条近一个月相关公开信息。"
     if quality.get("level") in {None, "empty"}:
         quality["level"] = "ok"
     errors = [*(news.get("errors") or []), *(macro.get("errors") or [])]
@@ -530,11 +551,32 @@ def fund_flow_sanity_issues(rows: List[Dict[str, Any]], baijiu: List[Dict[str, A
     issues: List[Dict[str, Any]] = []
     if not baijiu:
         issues.append({"type": "baijiu_table_empty", "message": "白酒板块资金表为空"})
-    for row in rows:
+    seen = set()
+    for row in [*rows, *baijiu]:
+        row_key = (row.get("板块"), row.get("板块代码"), row.get("source"))
+        if row_key in seen:
+            continue
+        seen.add(row_key)
         name = row.get("板块", "未知板块")
         net = to_float(row.get("净流入（亿）"))
+        super_large = to_float(row.get("超大单（亿）"))
+        large = to_float(row.get("大单（亿）"))
         amount = to_float(row.get("成交额（亿）"))
         rate = to_float(row.get("净流入率 %"))
+        if net is not None and super_large is not None and large is not None:
+            expected_net = round(super_large + large, 2)
+            if abs(net - expected_net) > 0.03:
+                issues.append(
+                    {
+                        "type": "fund_flow_main_net_mismatch",
+                        "board": name,
+                        "net": net,
+                        "super_large": super_large,
+                        "large": large,
+                        "expected_net": expected_net,
+                        "message": "净流入应等于超大单净额+大单净额，疑似口径或字段映射异常",
+                    }
+                )
         if net is not None and amount is not None and amount > 0 and abs(net) > amount:
             issues.append(
                 {
@@ -688,6 +730,17 @@ def build_core_views(analysis: Dict[str, Any]) -> List[str]:
     treasury = next((item for item in macro_items if "10年期国债" in str(item.get("title") or item.get("summary") or "")), None)
     if treasury:
         views.append(f"宏观利率：{treasury.get('summary') or treasury.get('title')}")
+    market_structure_keywords = ["富时", "A50", "调仓", "集合竞价", "节前", "休市", "机械性卖压"]
+    for item in macro_items:
+        title_summary = f"{item.get('title') or ''} {item.get('summary') or ''}"
+        if any(key in title_summary for key in market_structure_keywords):
+            views.append(f"交易结构：{item.get('summary') or item.get('title')}")
+            break
+    for item in macro_items:
+        title_summary = f"{item.get('title') or ''} {item.get('summary') or ''}"
+        if any(key in title_summary for key in ["日本央行", "日元", "美伊", "伊朗", "霍尔木兹", "油价"]):
+            views.append(f"宏观风险：{item.get('summary') or item.get('title')}")
+            break
     return views[:7]
 
 
@@ -695,6 +748,7 @@ def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
     quotes = analysis.get("quotes") or {}
     fund_flow = analysis.get("fund_flow") or {}
     macro = analysis.get("macro") or {}
+    macro_items = macro.get("items") or []
     summary = analysis.get("summary") or {}
     primary = (quotes.get("quotes") or {}).get("600519", {})
     baijiu_rows_ = fund_flow.get("baijiu") or []
@@ -711,9 +765,13 @@ def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
     amount = to_float(primary.get("成交额（亿）"))
     if pct is not None and close is not None:
         direction = "下跌" if pct < 0 else "上涨" if pct > 0 else "平盘"
+        structure_hint = ""
+        if any("富时中国A50" in f"{item.get('title') or ''} {item.get('summary') or ''}" for item in macro_items):
+            structure_hint = "尾盘还需优先识别富时A50调仓、收盘集合竞价和节前休市带来的机械性卖压。"
         lines.append(
             f"结论：今日贵州茅台{direction}{fmt_signed(pct, '%')}，收于{close:.2f}元；"
             "核心不是单一新闻冲击，而是技术承压、白酒资金分歧和成长板块吸金共同作用。"
+            f"{structure_hint}"
         )
     tech_parts = []
     if open_price is not None and high is not None and low is not None and close is not None:
@@ -751,15 +809,24 @@ def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
     if fund_parts:
         lines.append("资金流动面：" + "；".join(fund_parts) + "。")
 
-    macro_items = macro.get("items") or []
     macro_parts = []
+    priority_keywords = ["富时", "A50", "调仓", "集合竞价", "节前", "休市", "机械性卖压", "日本央行", "日元", "美伊", "伊朗", "霍尔木兹", "油价"]
     for item in macro_items:
         title = str(item.get("title") or "")
         summary_text = str(item.get("summary") or "")
-        if any(key in title + summary_text for key in ["FOMC", "10年期国债", "PCE", "非农", "CPI", "PPI"]):
+        if any(key in title + summary_text for key in priority_keywords):
             macro_parts.append(summary_text or title)
-        if len(macro_parts) >= 2:
+        if len(macro_parts) >= 3:
             break
+    for item in macro_items:
+        if len(macro_parts) >= 3:
+            break
+        title = str(item.get("title") or "")
+        summary_text = str(item.get("summary") or "")
+        if any(key in title + summary_text for key in ["FOMC", "10年期国债", "PCE", "非农", "CPI", "PPI"]):
+            candidate = summary_text or title
+            if candidate not in macro_parts:
+                macro_parts.append(candidate)
     if not macro_parts:
         macro_parts.append("宏观事件窗口暂以已抓取的利率、汇率与风险事件为准，缺数据时不强行编造。")
     lines.append("宏观消息面：" + "；".join(macro_parts) + "。")
@@ -850,8 +917,9 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     sector = read_json(data_dir / "sector_fund_flow.json", default={}) or {}
     sector = normalize_fund_flow_quality(sector)
+    quotes = read_json(data_dir / "quotes.json", default={}) or {}
     rows: List[Dict[str, Any]] = sector.get("rows", [])
-    stock_rows: List[Dict[str, Any]] = sector.get("stock_rows", [])
+    stock_rows: List[Dict[str, Any]] = enrich_stock_rows_with_quotes(sector.get("stock_rows", []), quotes)
     fund_config = config.get("fund_flow", {})
     legacy_top_n = int(fund_config.get("top_n", 5))
     inflow_outflow_top_n = int(fund_config.get("inflow_outflow_top_n", legacy_top_n))
@@ -905,7 +973,6 @@ def main() -> None:
                 issues.append({"table": table_name, "row": idx, "missing_columns": missing_cols})
     issues.extend(fund_flow_sanity_issues(rows, baijiu))
 
-    quotes = read_json(data_dir / "quotes.json", default={}) or {}
     news = read_json(data_dir / "news.json", default={}) or {}
     research = read_json(data_dir / "research.json", default={}) or {}
     macro = read_json(data_dir / "macro.json", default={}) or {}

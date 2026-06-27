@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -37,13 +38,56 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
     return value in {"y", "yes", "是", "需要"}
 
 
+def build_launchd_plist(repo_dir: Path, python_path: Path, label: str = "com.wubaiqi.a-share-report-center") -> str:
+    script = repo_dir / "scripts" / "run_report_center.py"
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{python_path}</string>
+    <string>{script}</string>
+    <string>--config</string>
+    <string>{repo_dir / "config.yaml"}</string>
+    <string>--root</string>
+    <string>{repo_dir}</string>
+  </array>
+  <key>WorkingDirectory</key><string>{repo_dir}</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>{repo_dir / "data" / "report_center.launchd.out.log"}</string>
+  <key>StandardErrorPath</key><string>{repo_dir / "data" / "report_center.launchd.err.log"}</string>
+</dict>
+</plist>
+"""
+
+
+def write_launchd_plist(repo_dir: Path, python_path: Path, out_path: Path | None = None) -> Path:
+    out = out_path or (repo_dir / "data" / "com.wubaiqi.a-share-report-center.plist")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(build_launchd_plist(repo_dir=repo_dir, python_path=python_path), encoding="utf-8")
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--example", default="config.example.yaml")
     parser.add_argument("--enable-feishu", action="store_true", help="Enable Feishu document/card publishing.")
+    parser.add_argument("--install-schedule", action="store_true", help="Write a launchd plist for the report center.")
+    parser.add_argument("--schedule-dry-run", action="store_true", help="Print launchd plist instead of writing it.")
     parser.add_argument("--no-prompt", action="store_true", help="Do not ask questions; use flags and fail fast on missing tokens.")
     args = parser.parse_args()
+
+    if args.schedule_dry_run and not args.install_schedule:
+        print(build_launchd_plist(repo_dir=Path.cwd(), python_path=Path(sys.executable)))
+        return
 
     enable_feishu = args.enable_feishu
     if not args.no_prompt and not enable_feishu:
@@ -71,6 +115,16 @@ def main() -> None:
         print("飞书发布已启用：run_daily.py --publish-feishu 会转换 HTML 并发送分享卡片。")
     else:
         print("飞书发布未启用：run_daily.py 默认只生成 HTML。")
+    if args.install_schedule or args.schedule_dry_run:
+        repo_dir = Path.cwd()
+        python_path = Path(sys.executable)
+        plist = build_launchd_plist(repo_dir=repo_dir, python_path=python_path)
+        if args.schedule_dry_run:
+            print(plist)
+        else:
+            out = write_launchd_plist(repo_dir=repo_dir, python_path=python_path)
+            print(f"已生成 launchd plist：{out}")
+            print(f"可手动安装：launchctl load {out}")
 
 
 if __name__ == "__main__":

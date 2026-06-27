@@ -55,6 +55,8 @@ class RenderHtmlTest(unittest.TestCase):
             self.assertIn("<td>工业金属</td>", html)
             self.assertIn("white-space: nowrap", html)
             self.assertIn("a { color: #2563eb", html)
+            self.assertIn('class="pdf-export"', html)
+            self.assertIn('href="report.pdf"', html)
 
     def test_fallback_renderer_outputs_clickable_markdown_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,6 +79,7 @@ class RenderHtmlTest(unittest.TestCase):
             html = out_path.read_text(encoding="utf-8")
             self.assertIn('<a href="https://example.com/news">贵州茅台调价新闻</a>', html)
             self.assertNotIn("[贵州茅台调价新闻]", html)
+            self.assertIn("导出PDF", html)
 
     def test_pandoc_renderer_injects_report_css(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +91,7 @@ class RenderHtmlTest(unittest.TestCase):
 
             def fake_run(cmd, check):
                 calls.append(cmd)
+                Path(cmd[cmd.index("-o") + 1]).write_text("<html><head></head><body><h1>测试晚报</h1></body></html>", encoding="utf-8")
 
             with patch("subprocess.run", side_effect=fake_run):
                 render_html.render_with_pandoc(report_path, out_path, "A股收盘晚报")

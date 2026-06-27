@@ -444,6 +444,14 @@ def year_start_for_date(target_date: str | None) -> str:
     return f"{datetime.now().year}-01-01"
 
 
+def lookback_start_for_date(target_date: str | None, lookback_days: int) -> str:
+    if not target_date:
+        return year_start_for_date(target_date)
+    target = datetime.strptime(target_date, "%Y-%m-%d").date()
+    start = target - timedelta(days=max(lookback_days - 1, 0))
+    return start.strftime("%Y-%m-%d")
+
+
 def parse_sse_announcements(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = ((payload.get("pageHelp") or {}).get("data") or [])
     items: List[Dict[str, Any]] = []
@@ -692,7 +700,7 @@ def main() -> None:
     sources = []
     if args.date:
         try:
-            official = fetch_sse_announcements(primary_symbol, year_start_for_date(args.date), args.date)
+            official = fetch_sse_announcements(primary_symbol, lookback_start_for_date(args.date, lookback_days), args.date)
             news.extend(official)
             if official:
                 sources.append("上交所公告")

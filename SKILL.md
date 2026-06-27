@@ -1,11 +1,11 @@
 ---
 name: shoupan-wanbao
-description: Use when an agent needs to generate an A-share closing/evening report HTML from public market data, sector fund-flow data, company news, institutional views, retail sentiment, macro/risk events, and source-quality evidence; also use when setting up a reusable scheduled stock watch report currently focused on 贵州茅台 with support for more tracked stocks later.
+description: Use when an agent needs to generate one A-share daily closing/evening report HTML for a single trading day from public market data, sector fund-flow data, company news, institutional views, retail sentiment, macro/risk events, and source-quality evidence; currently focused on 贵州茅台 with support for more tracked stocks later.
 ---
 
-# 收盘晚报
+# 收盘晚报（日报）
 
-This skill generates a daily A-share closing report. The default tracked stock is 贵州茅台 `600519.SH`; future tracked stocks should be added through `config.yaml`, not hard-coded into scripts.
+This skill generates one daily A-share closing report. It does not generate weekly reports. The default tracked stock is 贵州茅台 `600519.SH`; future tracked stocks should be added through `config.yaml`, not hard-coded into scripts.
 
 The final daily artifact is HTML:
 
@@ -13,7 +13,23 @@ The final daily artifact is HTML:
 output/a_share_evening_report_YYYY-MM-DD.html
 ```
 
+Every generated HTML page should include a `导出PDF` link to the sibling PDF filename. PDF is optional and generated on demand with full-page screenshot fidelity:
+
+```bash
+python scripts/export_pdf.py --html output/a_share_evening_report_YYYY-MM-DD.html
+```
+
+The default PDF mode captures the rendered browser page as one long screenshot and wraps it into a single-page PDF. Use `--mode print` only as a degraded fallback.
+
 `output/report.md` is an intermediate artifact for Feishu, email, or another agent.
+Successful daily runs archive `data/archive/analysis_YYYY-MM-DD.json`; the separate `shoupan-zhoubao` skill consumes those archives.
+
+## Related Skills
+
+- `shoupan-zhoubao`: weekly aggregation and weekly-review rules. Use it after the daily reports exist.
+- `pa-pa-le`: shared crawling layer for data gaps, logged-in/dynamic pages, comments, and source-status evidence.
+
+Do not force weekly-report sections or weekly return logic into the daily report.
 
 ## Required Crawling Layer
 
@@ -58,9 +74,11 @@ Use `scripts/run_daily.py` as the canonical entrypoint:
 
 State is stored in `data/run_state.json` by default.
 
-## Report Contract
+## Daily Report Contract
 
-The report must include:
+These rules apply to `output/a_share_evening_report_YYYY-MM-DD.html` and `scripts/run_daily.py`.
+
+The daily report must include:
 
 - primary stock quote and configured peer-stock comparison
 - main target news, industry news, and macro/risk timelines
@@ -73,6 +91,8 @@ The report must include:
 - data sources, quality, errors, and risk disclaimer
 
 Brokerage reports, target prices, and ratings must appear only under `机构观点`; do not place them in main target news.
+
+Do not force weekly-report sections into the daily report. Daily output should explain one trading day with same-day market data, news, sentiment, and source quality.
 
 ## Fund-Flow Rules
 

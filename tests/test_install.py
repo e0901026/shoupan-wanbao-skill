@@ -46,6 +46,19 @@ class InstallTest(unittest.TestCase):
             payload = yaml.safe_load(config.read_text(encoding="utf-8"))
             self.assertFalse(payload["feishu"]["dry_run"])
 
+    def test_schedule_dry_run_does_not_write_config_or_require_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with (
+                patch.object(sys, "argv", ["install.py", "--schedule-dry-run", "--config", str(tmp_path / "config.yaml")]),
+                patch("builtins.print"),
+                patch.dict(os.environ, {}, clear=True),
+                patch("pathlib.Path.cwd", return_value=tmp_path),
+            ):
+                install.main()
+
+            self.assertFalse((tmp_path / "config.yaml").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
