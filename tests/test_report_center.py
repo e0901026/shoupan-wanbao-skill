@@ -86,7 +86,101 @@ class ReportCenterTest(unittest.TestCase):
             command_text = [" ".join(cmd) for cmd in calls]
             self.assertTrue(any("scripts/run_daily.py" in cmd and "2026-06-23" in cmd for cmd in command_text))
             self.assertTrue(any("scripts/run_daily.py" in cmd and "2026-06-24" in cmd for cmd in command_text))
+            self.assertTrue(any("scripts/audit_report_history.py" in cmd and "2026-06-24" in cmd for cmd in command_text))
             self.assertTrue(any("scripts/render_index.py" in cmd for cmd in command_text))
+
+    def test_report_center_audits_generated_morning_report(self) -> None:
+        calls = []
+
+        def fake_run(cmd, check):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        plan = run_report_center.RunPlan(
+            root=ROOT,
+            morning_date="2026-07-20",
+            morning_window_start="2026-07-17 15:00",
+            morning_window_end="2026-07-20 08:30",
+            render_index=False,
+        )
+        with patch("subprocess.run", side_effect=fake_run):
+            run_report_center.execute_plan(plan, config="config.yaml", py=sys.executable)
+
+        command_text = [" ".join(cmd) for cmd in calls]
+        self.assertTrue(any("scripts/run_morning.py" in cmd for cmd in command_text))
+        self.assertTrue(
+            any(
+                "scripts/audit_morning_history.py" in cmd
+                and "2026-07-17 15:00" in cmd
+                and "2026-07-20 08:30" in cmd
+                for cmd in command_text
+            )
+        )
+
+    def test_report_center_catches_up_previous_trading_day_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "output").mkdir()
+            cache = root / "data" / "trade_calendar_2026.json"
+            cache.parent.mkdir()
+            cache.write_text(
+                json.dumps(
+                    {
+                        "days": [
+                            {"date": "2026-06-26", "is_open": True},
+                            {"date": "2026-06-29", "is_open": True},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = root / "data" / "report_center_state.json"
+            state.write_text(json.dumps({"last_daily_date": "2026-06-25"}), encoding="utf-8")
+
+            plan = run_report_center.build_run_plan(
+                today="2026-06-29",
+                now_time="08:30",
+                root=root,
+                calendar=report_calendar.TradeCalendar(cache),
+                state_file=state,
+            )
+
+            self.assertEqual(plan.daily_dates, ["2026-06-26"])
+
+    def test_report_center_catches_up_missing_previous_weekly_after_saturday(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "output").mkdir()
+            cache = root / "data" / "trade_calendar_2026.json"
+            cache.parent.mkdir()
+            cache.write_text(
+                json.dumps(
+                    {
+                        "days": [
+                            {"date": "2026-06-22", "is_open": True},
+                            {"date": "2026-06-23", "is_open": True},
+                            {"date": "2026-06-24", "is_open": True},
+                            {"date": "2026-06-25", "is_open": True},
+                            {"date": "2026-06-26", "is_open": True},
+                            {"date": "2026-06-29", "is_open": True},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = run_report_center.build_run_plan(
+                today="2026-06-29",
+                now_time="08:30",
+                root=root,
+                calendar=report_calendar.TradeCalendar(cache),
+                state_file=root / "data" / "report_center_state.json",
+            )
+
+            self.assertEqual(
+                plan.weekly_dates,
+                ["2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26"],
+            )
 
     def test_weekly_report_aggregates_daily_archives_and_divergences(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,6 +456,40 @@ class ReportCenterTest(unittest.TestCase):
         self.assertNotIn("较前一交易日-5.63亿元", html)
         self.assertIn("白酒Ⅱ：净流入 -12.69亿；超大单 -5.20亿；大单 -7.49亿；小单 +7.08亿", html)
 
+    def test_weekly_report_fixed_liquor_observation_reads_current_baijiu_rows(self) -> None:
+        analyses = {
+            "2026-07-10": {
+                "quotes": {"quotes": {"600519": {"收盘价": 1204.98, "涨跌幅": 1.93, "成交额（亿）": 62.23}}},
+                "daily_review": {"lines": []},
+                "news": {"items": []},
+                "sentiment": {"summary": {}},
+                "summary": {},
+                "fund_flow": {
+                    "baijiu": [
+                        {"板块": "白酒Ⅱ", "净流入（亿）": 13.16, "超大单（亿）": 10.49, "大单（亿）": 2.67, "小单（亿）": -2.32, "涨跌幅 %": 3.64, "成交额（亿）": 174.05, "净流入率 %": 7.56},
+                        {"板块": "贵州茅台", "净流入（亿）": 0.28, "超大单（亿）": 0.08, "大单（亿）": 0.20, "小单（亿）": 0.04, "涨跌幅 %": 1.93, "成交额（亿）": 62.23, "净流入率 %": 0.45},
+                        {"板块": "非白酒", "净流入（亿）": -0.43, "超大单（亿）": -0.42, "大单（亿）": -0.01, "小单（亿）": 0.63, "涨跌幅 %": 2.14, "成交额（亿）": 18.14, "净流入率 %": -2.38},
+                    ],
+                    "inflow_top5": [],
+                    "outflow_top5": [],
+                    "divergence_net_inflow_price_down": [],
+                    "divergence_net_outflow_price_up": [],
+                    "divergence_super_in_large_out": [],
+                    "divergence_super_out_large_in": [],
+                },
+            }
+        }
+
+        html = run_weekly.build_weekly_html(analyses, "2026-07-10", "2026-07-10")
+
+        fixed_start = html.index("<h3>白酒与茅台固定观察</h3>")
+        fixed_end = html.index("<h2>四大背离周度分析</h2>")
+        fixed_section = html[fixed_start:fixed_end]
+        self.assertIn("<td>白酒Ⅱ</td>", fixed_section)
+        self.assertIn("<td>贵州茅台</td>", fixed_section)
+        self.assertIn("<td>非白酒</td>", fixed_section)
+        self.assertIn("+13.16", fixed_section)
+
     def test_weekly_report_uses_structured_institutional_evidence_when_available(self) -> None:
         analyses = {
             "2026-06-26": {
@@ -520,6 +648,24 @@ class ReportCenterTest(unittest.TestCase):
         self.assertIn("贵州茅台周末公告", html)
         self.assertNotIn("板块资金流向", html)
         self.assertNotIn("收盘价", html)
+
+    def test_morning_report_excludes_out_of_window_and_unverifiable_items(self) -> None:
+        items = [
+            {"title": "盘后有效", "time": "2026-07-17 16:10"},
+            {"title": "盘前旧闻", "time": "2026-07-17 14:30"},
+            {"title": "周末有效", "time": "2026-07-19"},
+            {"title": "周一日期不精确", "time": "2026-07-20"},
+            {"title": "时间缺失", "time": "暂缺"},
+        ]
+
+        kept, excluded = run_morning.filter_items_to_window(
+            items,
+            "2026-07-17 15:00",
+            "2026-07-20 08:30",
+        )
+
+        self.assertEqual([item["title"] for item in kept], ["盘后有效", "周末有效"])
+        self.assertEqual(excluded, 3)
 
     def test_index_scans_three_report_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

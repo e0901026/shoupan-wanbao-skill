@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from audit_report_history import audit_analysis
 from report_html_utils import ensure_pdf_export_link
 
 try:
@@ -779,13 +780,17 @@ def institutional_selloff_check_html(analyses: Dict[str, Dict[str, Any]], totals
     return f"<p class=\"note\">{html.escape(conclusion)}</p>{table(['验证项','本周证据','状态','怎么解读'], rows)}"
 
 
+def iter_liquor_compare_rows(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fund_flow = analysis.get("fund_flow") or {}
+    rows = fund_flow.get("liquor_compare") or fund_flow.get("baijiu") or []
+    return [row for row in rows if clean_text(row.get("板块")) in {"白酒Ⅱ", "贵州茅台", "非白酒"}]
+
+
 def liquor_compare_totals(analyses: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
     totals: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for analysis in analyses.values():
-        for row in (analysis.get("fund_flow") or {}).get("liquor_compare") or []:
+        for row in iter_liquor_compare_rows(analysis):
             name = clean_text(row.get("板块"))
-            if name not in {"白酒Ⅱ", "贵州茅台", "非白酒"}:
-                continue
             for field in ("净流入（亿）", "超大单（亿）", "大单（亿）", "小单（亿）"):
                 totals[name][field] += to_float(row.get(field)) or 0
     return totals
@@ -794,10 +799,8 @@ def liquor_compare_totals(analyses: Dict[str, Dict[str, Any]]) -> Dict[str, Dict
 def liquor_compare_weekly_rows(analyses: Dict[str, Dict[str, Any]]) -> List[List[str]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for analysis in analyses.values():
-        for row in (analysis.get("fund_flow") or {}).get("liquor_compare") or []:
+        for row in iter_liquor_compare_rows(analysis):
             name = clean_text(row.get("板块"))
-            if name not in {"白酒Ⅱ", "贵州茅台", "非白酒"}:
-                continue
             item = grouped.setdefault(
                 name,
                 {
@@ -1112,11 +1115,24 @@ ul {{ padding-left:20px; }}
 </main></body></html>"""
 
 
-def write_weekly_report(root: str | Path, dates: List[str], output_dir: str | Path = "output") -> Path:
+def write_weekly_report(
+    root: str | Path,
+    dates: List[str],
+    output_dir: str | Path = "output",
+    strict_audit: bool = False,
+) -> Path:
     root_path = Path(root)
     analyses = load_daily_analyses(root_path, dates)
     if not analyses:
         raise RuntimeError("没有找到可用于周报的日报归档 JSON。")
+    if strict_audit:
+        failed = {
+            date: audit_analysis(date, analysis, root_path / "output" / f"a_share_evening_report_{date}.html")
+            for date, analysis in analyses.items()
+        }
+        failed = {date: issues for date, issues in failed.items() if issues}
+        if failed:
+            raise RuntimeError("周报输入日报未通过严格审计：" + json.dumps(failed, ensure_ascii=False))
     start = min(analyses)
     end = max(analyses)
     institutional_evidence = load_institutional_evidence(root_path, start, end)
@@ -1133,8 +1149,9 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--dates", nargs="+", required=True)
     parser.add_argument("--output-dir", default="output")
+    parser.add_argument("--allow-unaudited", action="store_true", help="仅供测试/草稿；正式周报默认要求所有日报通过严格审计。")
     args = parser.parse_args()
-    print(write_weekly_report(args.root, args.dates, args.output_dir))
+    print(write_weekly_report(args.root, args.dates, args.output_dir, strict_audit=not args.allow_unaudited))
 
 
 if __name__ == "__main__":

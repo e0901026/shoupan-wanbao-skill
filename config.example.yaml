@@ -2,7 +2,7 @@ timezone: Asia/Shanghai
 report_time: "17:30"
 
 report_center:
-  scheduler: launchd
+  scheduler: codex_automation
   daily_time: "16:00"
   weekly_time: "09:00"
   monday_morning_time: "08:30"
@@ -42,6 +42,7 @@ peer_stocks:
 
 fund_flow:
   source_order:
+    - tushare
     - eastmoney
     - akshare
   sector_types:
@@ -114,6 +115,12 @@ sentiment:
   lookback_days: 30
   max_pages: 3
   max_items: 40
+  # Xueqiu priority: OpenCli first, then optional user-logged-in Chrome/CDP, then Agent Reach if available.
+  xueqiu_opencli_enabled: true
+  xueqiu_opencli_timeout: 12
+  # Optional: attach to a user-logged-in Chrome for sources blocked by WAF/login, such as Xueqiu.
+  # Equivalent env vars: XUEQIU_CDP_URL or CHROME_REMOTE_DEBUGGING_URL.
+  # xueqiu_cdp_url: http://127.0.0.1:9222
 
 feishu:
   # 推荐通过环境变量注入密钥，不要写死在配置文件中。

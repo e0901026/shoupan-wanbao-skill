@@ -53,8 +53,11 @@ def main() -> None:
     if not fund_flow.get("outflow_top5"):
         errors.append("板块资金流出 TOP5 为空")
     fund_quality = fund_flow.get("quality") or {}
-    if args.strict_fund_flow and fund_quality.get("level") != "complete":
-        errors.append(f"严格资金流门禁失败：quality={fund_quality}")
+    if args.strict_fund_flow and (
+        fund_quality.get("level") != "complete"
+        or fund_quality.get("source_mode") != "tushare_sw2_stock_moneyflow_aggregate"
+    ):
+        errors.append(f"严格资金流门禁失败：正式报告仅接受申万二级成分股聚合口径，quality={fund_quality}")
     if analysis.get("quality_issues"):
         errors.append(f"analysis 中存在质量问题：{analysis['quality_issues']}")
 

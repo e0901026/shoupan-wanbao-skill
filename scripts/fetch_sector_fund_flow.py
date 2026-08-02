@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
 from bs4 import BeautifulSoup
 
-from common import ensure_required_fund_columns, load_yaml, market_session, now_iso, to_float, write_json
+from common import ensure_required_fund_columns, load_yaml, market_session, now_iso, read_json, to_float, write_json
 
 DEGRADED_THS_MISSING_FIELDS = ["超大单（亿）", "大单（亿）", "小单（亿）", "成交额（亿）", "净流入率 %"]
 EASTMONEY_SECTOR_FS = {
@@ -18,6 +19,10 @@ EASTMONEY_SECTOR_FS = {
 }
 EASTMONEY_CLIST_HOSTS = ["push2.eastmoney.com", "push2delay.eastmoney.com"]
 EASTMONEY_PAGE_SIZE = 100
+SW2_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+SW2_MIN_INDUSTRY_COUNT = 130
+SW2_MIN_MEMBER_COUNT = 4500
+SW2_MIN_SUPPORTED_MONEYFLOW_COVERAGE = 0.995
 
 
 def eastmoney_yuan_to_yi(value: Any) -> float | None:
@@ -54,7 +59,7 @@ def eastmoney_item_to_row(item: Dict[str, Any], label: str) -> Dict[str, Any]:
         "数据时间": data_time,
         "数据日期": data_date,
         "sector_type": label,
-        "source": "eastmoney.push2.clist.sw2_fund_flow" if label == "industry" else "eastmoney.push2.clist.fund_flow",
+        "source": "eastmoney.push2.clist.industry_board_fund_flow" if label == "industry" else "eastmoney.push2.clist.concept_fund_flow",
     }
 
 
@@ -262,6 +267,253 @@ def active_sw_member_rows(member_rows: List[Dict[str, Any]], trade_date: str) ->
         if in_date <= target <= out_date:
             active.append(row)
     return active
+
+
+def tushare_call_with_retry(callable_obj, *, attempts: int = 3, **kwargs):
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return callable_obj(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(1.0 * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Tushare call failed without an exception")
+
+
+def valid_sw2_member_cache(payload: Dict[str, Any], cache_path: Path) -> bool:
+    if payload.get("schema_version") != 3 or len(payload.get("industry_codes") or []) < SW2_MIN_INDUSTRY_COUNT:
+        return False
+    if len(payload.get("rows") or []) < SW2_MIN_MEMBER_COUNT:
+        return False
+    try:
+        return time.time() - cache_path.stat().st_mtime <= SW2_CACHE_MAX_AGE_SECONDS
+    except OSError:
+        return False
+
+
+def previous_compact_date(value: str) -> str:
+    return (datetime.strptime(value, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+
+
+def reconcile_sw2_member_periods(rows: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], int]:
+    by_stock: Dict[str, List[Dict[str, Any]]] = {}
+    for original in rows:
+        row = dict(original)
+        if row.get("ts_code") and row.get("in_date"):
+            by_stock.setdefault(str(row["ts_code"]), []).append(row)
+    repaired = 0
+    reconciled: List[Dict[str, Any]] = []
+    for stock_rows in by_stock.values():
+        starts = sorted({str(row.get("in_date")) for row in stock_rows if row.get("in_date")})
+        for row in stock_rows:
+            in_date = str(row.get("in_date"))
+            later_starts = [value for value in starts if value > in_date]
+            if later_starts:
+                inferred_out = previous_compact_date(later_starts[0])
+                current_out = str(row.get("out_date") or "")
+                if not current_out or current_out > inferred_out:
+                    row["out_date"] = inferred_out
+                    row["period_reconciled"] = True
+                    repaired += 1
+            reconciled.append(row)
+    return reconciled, repaired
+
+
+def fetch_complete_sw2_member_history(pro, cache_path: str | Path | None = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    cache = Path(cache_path) if cache_path else None
+    cached: Dict[str, Any] = {}
+    if cache:
+        cached = read_json(cache, {}) or {}
+        if valid_sw2_member_cache(cached, cache):
+            rows = cached.get("rows") or []
+            return rows, {
+                "member_source": "tushare.index_member_all.by_l2_code.cache",
+                "industry_count": len(cached.get("industry_codes") or []),
+                "populated_industry_count": len(cached.get("industry_codes") or [])
+                - len(cached.get("empty_industry_codes") or []),
+                "empty_industry_codes": cached.get("empty_industry_codes") or [],
+                "member_history_rows": len(rows),
+                "period_reconciled_count": int(cached.get("period_reconciled_count") or 0),
+                "cache_generated_at": cached.get("generated_at"),
+            }
+        if (
+            cached.get("schema_version") == 2
+            and len(cached.get("industry_codes") or []) >= SW2_MIN_INDUSTRY_COUNT
+            and len(cached.get("rows") or []) >= SW2_MIN_MEMBER_COUNT
+        ):
+            rows, repaired = reconcile_sw2_member_periods(cached.get("rows") or [])
+            cached["schema_version"] = 3
+            cached["rows"] = rows
+            cached["period_reconciled_count"] = repaired
+            cached["generated_at"] = now_iso()
+            write_json(cache, cached)
+            return rows, {
+                "member_source": "tushare.index_member_all.by_l2_code.cache_reconciled",
+                "industry_count": len(cached.get("industry_codes") or []),
+                "populated_industry_count": len(cached.get("industry_codes") or [])
+                - len(cached.get("empty_industry_codes") or []),
+                "empty_industry_codes": cached.get("empty_industry_codes") or [],
+                "member_history_rows": len(rows),
+                "period_reconciled_count": repaired,
+                "cache_generated_at": cached.get("generated_at"),
+            }
+
+    migrate_current_rows = cached.get("rows") or [] if cached.get("schema_version") == 1 else []
+    migrate_codes = cached.get("industry_codes") or [] if migrate_current_rows else []
+    if len(migrate_codes) >= SW2_MIN_INDUSTRY_COUNT and len(migrate_current_rows) >= SW2_MIN_MEMBER_COUNT:
+        industry_codes = sorted({str(code) for code in migrate_codes if code})
+    else:
+        migrate_current_rows = []
+        classify = tushare_call_with_retry(
+            pro.index_classify,
+            level="L2",
+            src="SW2021",
+            fields="index_code,industry_name,level,industry_code,src",
+        )
+        classifications = classify.to_dict(orient="records")
+        industry_codes = sorted({str(row.get("index_code")) for row in classifications if row.get("index_code")})
+    if len(industry_codes) < SW2_MIN_INDUSTRY_COUNT:
+        raise ValueError(f"申万二级行业分类不完整：仅取得 {len(industry_codes)} 个行业")
+
+    rows: List[Dict[str, Any]] = []
+    empty_codes: List[str] = []
+    migrate_by_code: Dict[str, List[Dict[str, Any]]] = {}
+    for row in migrate_current_rows:
+        migrate_by_code.setdefault(str(row.get("l2_code") or ""), []).append(row)
+    for code in industry_codes:
+        current_rows = migrate_by_code.get(code)
+        if current_rows is None:
+            current_frame = tushare_call_with_retry(
+                pro.index_member_all,
+                l2_code=code,
+                is_new="Y",
+                fields="l2_code,l2_name,ts_code,in_date,out_date,is_new",
+            )
+            current_rows = current_frame.to_dict(orient="records")
+        historical_frame = tushare_call_with_retry(
+            pro.index_member_all,
+            l2_code=code,
+            is_new="N",
+            fields="l2_code,l2_name,ts_code,in_date,out_date,is_new",
+        )
+        code_rows = current_rows + historical_frame.to_dict(orient="records")
+        if not code_rows:
+            empty_codes.append(code)
+        rows.extend(code_rows)
+    populated_industry_count = len(industry_codes) - len(empty_codes)
+    if populated_industry_count < SW2_MIN_INDUSTRY_COUNT:
+        raise ValueError(
+            f"申万二级有效行业不完整：分类 {len(industry_codes)} 个，"
+            f"有成分行业 {populated_industry_count} 个，空行业 {','.join(empty_codes[:10])}"
+        )
+
+    # Tushare 的 is_new=Y 在行业调整后可能暂时同时保留新旧归属，而旧归属的
+    # out_date 只出现在 is_new=N。按同一段入选记录合并，并优先保留带退出日的历史行。
+    deduped: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for row in rows:
+        if not row.get("l2_code") or not row.get("ts_code"):
+            continue
+        key = (str(row.get("l2_code")), str(row.get("ts_code")), str(row.get("in_date") or ""))
+        previous = deduped.get(key)
+        if previous is None or (row.get("out_date") and not previous.get("out_date")):
+            deduped[key] = row
+    rows, period_reconciled_count = reconcile_sw2_member_periods(list(deduped.values()))
+    if len(rows) < SW2_MIN_MEMBER_COUNT:
+        raise ValueError(f"申万二级成分历史不完整：仅取得 {len(rows)} 条记录")
+
+    generated_at = now_iso()
+    if cache:
+        write_json(
+            cache,
+            {
+                "schema_version": 3,
+                "generated_at": generated_at,
+                "source": "tushare.index_member_all.by_l2_code",
+                "industry_codes": industry_codes,
+                "empty_industry_codes": empty_codes,
+                "period_reconciled_count": period_reconciled_count,
+                "rows": rows,
+            },
+        )
+    return rows, {
+        "member_source": "tushare.index_member_all.by_l2_code",
+        "industry_count": len(industry_codes),
+        "populated_industry_count": populated_industry_count,
+        "empty_industry_codes": empty_codes,
+        "member_history_rows": len(rows),
+        "period_reconciled_count": period_reconciled_count,
+        "cache_generated_at": generated_at,
+    }
+
+
+def assess_sw2_universe_coverage(
+    member_rows: List[Dict[str, Any]],
+    moneyflow_rows: List[Dict[str, Any]],
+    daily_rows: List[Dict[str, Any]],
+    trade_date: str,
+    member_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    active = active_sw_member_rows(member_rows, trade_date)
+    active_pairs = {(str(row.get("l2_code")), str(row.get("ts_code"))) for row in active}
+    active_codes = {pair[0] for pair in active_pairs}
+    active_stocks = {pair[1] for pair in active_pairs}
+    moneyflow_stocks = {str(row.get("ts_code")) for row in moneyflow_rows if row.get("ts_code")}
+    daily_amounts = {
+        str(row.get("ts_code")): to_float(row.get("amount")) or 0.0
+        for row in daily_rows
+        if row.get("ts_code")
+    }
+    traded_stocks = set(daily_amounts)
+    traded_active = active_stocks & traded_stocks
+    supported_traded_active = {code for code in traded_active if not code.endswith(".BJ")}
+    matched = active_stocks & moneyflow_stocks
+    missing_traded = traded_active - moneyflow_stocks
+    unsupported_bj = {code for code in missing_traded if code.endswith(".BJ")}
+    unexpected_missing = missing_traded - unsupported_bj
+    supported_matched = supported_traded_active & moneyflow_stocks
+    supported_coverage = len(supported_matched) / len(supported_traded_active) if supported_traded_active else 0.0
+    memberships_by_stock: Dict[str, set[str]] = {}
+    for l2_code, ts_code in active_pairs:
+        memberships_by_stock.setdefault(ts_code, set()).add(l2_code)
+    duplicate_memberships = sum(1 for codes in memberships_by_stock.values() if len(codes) > 1)
+    total_turnover = sum(daily_amounts.get(code, 0.0) for code in traded_active)
+    excluded_turnover = sum(daily_amounts.get(code, 0.0) for code in unsupported_bj)
+    turnover_coverage = (total_turnover - excluded_turnover) / total_turnover if total_turnover else 0.0
+    result = {
+        **member_meta,
+        "active_industry_count": len(active_codes),
+        "active_member_count": len(active_stocks),
+        "moneyflow_stock_count": len(moneyflow_stocks),
+        "matched_member_count": len(matched),
+        "traded_active_member_count": len(traded_active),
+        "supported_traded_member_count": len(supported_traded_active),
+        "supported_moneyflow_coverage": round(supported_coverage, 4),
+        "excluded_bj_member_count": len(unsupported_bj),
+        "excluded_bj_turnover_qian_yuan": round(excluded_turnover, 2),
+        "turnover_coverage": round(turnover_coverage, 4),
+        "scope": "申万二级沪深成分股；北交所成分因 Tushare moneyflow 不提供资金分档而排除",
+        "duplicate_active_memberships": duplicate_memberships,
+        "status": "complete",
+    }
+    issues = []
+    if len(active_codes) < SW2_MIN_INDUSTRY_COUNT:
+        issues.append(f"active industries={len(active_codes)}")
+    if len(active_stocks) < SW2_MIN_MEMBER_COUNT:
+        issues.append(f"active members={len(active_stocks)}")
+    if supported_coverage < SW2_MIN_SUPPORTED_MONEYFLOW_COVERAGE:
+        issues.append(f"supported moneyflow coverage={supported_coverage:.2%}")
+    if unexpected_missing:
+        issues.append(f"unexpected traded members without moneyflow={len(unexpected_missing)}")
+    if duplicate_memberships:
+        issues.append(f"duplicate active memberships={duplicate_memberships}")
+    if issues:
+        result["status"] = "incomplete"
+        result["issues"] = issues
+        raise ValueError("申万二级资金聚合覆盖校验失败：" + "; ".join(issues))
+    return result
 
 
 def aggregate_tushare_sw2_moneyflow(
@@ -481,24 +733,35 @@ def fetch_tushare_stock_moneyflow(trade_date: str, token: str, stock: Dict[str, 
     return [build_tushare_stock_moneyflow_row(stock, moneyflow.to_dict(orient="records")[0], daily_row, trade_date)]
 
 
-def fetch_tushare_sw2_aggregate(trade_date: str, token: str) -> List[Dict[str, Any]]:
+def fetch_tushare_sw2_aggregate(
+    trade_date: str,
+    token: str,
+    cache_path: str | Path | None = None,
+    quality_out: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
     import tushare as ts
 
     compact = compact_date(trade_date)
     pro = ts.pro_api(token)
-    moneyflow = pro.moneyflow(
+    moneyflow = tushare_call_with_retry(
+        pro.moneyflow,
         trade_date=compact,
         fields=(
             "ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_md_amount,sell_md_amount,"
             "buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount,net_mf_amount"
         ),
     )
-    daily = pro.daily(trade_date=compact, fields="ts_code,trade_date,pct_chg,amount")
-    members = pro.index_member_all(fields="l2_code,l2_name,ts_code,in_date,out_date,is_new")
+    daily = tushare_call_with_retry(pro.daily, trade_date=compact, fields="ts_code,trade_date,pct_chg,amount")
+    member_rows, member_meta = fetch_complete_sw2_member_history(pro, cache_path=cache_path)
+    moneyflow_rows = moneyflow.to_dict(orient="records")
+    daily_rows = daily.to_dict(orient="records")
+    coverage = assess_sw2_universe_coverage(member_rows, moneyflow_rows, daily_rows, trade_date, member_meta)
+    if quality_out is not None:
+        quality_out.update(coverage)
     return aggregate_tushare_sw2_moneyflow(
-        moneyflow.to_dict(orient="records"),
-        members.to_dict(orient="records"),
-        daily.to_dict(orient="records"),
+        moneyflow_rows,
+        member_rows,
+        daily_rows,
         trade_date,
     )
 
@@ -570,6 +833,7 @@ def assess_fund_flow_quality(
     sources: List[str],
     target_date: str | None = None,
     data_dates: List[str] | None = None,
+    universe_coverage: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if not rows:
         return {
@@ -626,19 +890,35 @@ def assess_fund_flow_quality(
             "data_dates": clean_dates,
         }
     if any("tushare.moneyflow.sw2_aggregate" in source for source in sources):
+        if universe_coverage and universe_coverage.get("status") != "complete":
+            return {
+                "level": "incomplete",
+                "source_mode": "tushare_sw2_incomplete_universe",
+                "missing_fields": [],
+                "summary": "申万二级成分股或个股资金流覆盖不足，禁止用于正式排名与背离分析。",
+                "target_date": target_date,
+                "data_dates": clean_dates,
+            }
         return {
             "level": "complete",
             "source_mode": "tushare_sw2_stock_moneyflow_aggregate",
             "missing_fields": [],
-            "summary": "申万二级行业资金流由 Tushare moneyflow 个股资金流按申万二级成分股聚合；净流入统一为主力净流入=超大单净额+大单净额；Tushare 金额分档为小单<5万元、中单5-20万元、大单20-100万元、特大单/超大单>=100万元，基于主动买卖单统计；行业表按成分股档位净额加总。",
+            "summary": "申万二级行业资金流由 Tushare moneyflow 个股资金流按申万二级成分股聚合；当前资金流接口覆盖沪深成分，北交所成分排除并单列覆盖缺口；净流入统一为主力净流入=超大单净额+大单净额；Tushare 金额分档为小单<5万元、中单5-20万元、大单20-100万元、特大单/超大单>=100万元，基于主动买卖单统计；行业表按成分股档位净额加总。",
+            "target_date": target_date,
+            "data_dates": clean_dates,
+        }
+    if any("eastmoney.push2.clist.industry_board_fund_flow" in source for source in sources):
+        return {
+            "level": "noncanonical",
+            "source_mode": "eastmoney_industry_board_full_noncanonical",
+            "missing_fields": [],
+            "summary": "东方财富行业板块资金字段完整，但成分口径不能等同申万二级；仅可作为补充验证，不能用于申万二级正式排名与背离分析。",
             "target_date": target_date,
             "data_dates": clean_dates,
         }
     return {
         "level": "complete",
-        "source_mode": "eastmoney_sw2_full"
-        if any("eastmoney.push2.clist.sw2_fund_flow" in source for source in sources)
-        else ("eastmoney_full" if any("eastmoney" in source for source in sources) else "complete"),
+        "source_mode": "eastmoney_full" if any("eastmoney" in source for source in sources) else "complete",
         "missing_fields": [],
         "summary": "申万二级行业资金流数据包含净流入、超大单、大单、小单、涨跌幅、成交额、净流入率；净流入统一按主力净流入理解，即超大单净额+大单净额。",
         "target_date": target_date,
@@ -651,6 +931,7 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--date", help="Expected fund-flow trading date in YYYY-MM-DD format.")
+    parser.add_argument("--member-cache", help="Shared complete SW2 membership cache path. Defaults beside --out.")
     args = parser.parse_args()
 
     config = load_yaml(args.config)
@@ -660,31 +941,41 @@ def main() -> None:
     raw_rows: List[Dict[str, Any]] = []
     raw_stock_rows: List[Dict[str, Any]] = []
     supplements: Dict[str, Any] = {"coverage": []}
-
-    for label in sector_types:
-        fs = EASTMONEY_SECTOR_FS[label]
-        try:
-            raw_rows.extend(fetch_eastmoney_sector(fs, label))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"eastmoney sector {label} failed: {exc}")
-
-    if raw_rows and args.date:
-        eastmoney_dates = sorted({r.get("数据日期") for r in raw_rows if r.get("数据日期")})
-        if eastmoney_dates != [args.date]:
-            warnings.append(f"eastmoney returned non-target-date data: target={args.date}, data_dates={eastmoney_dates or ['unknown']}")
-            raw_rows = []
-
-    if not raw_rows:
-        tushare_token = os.getenv("TUSHARE_TOKEN")
-        if args.date and tushare_token and "industry" in sector_types:
-            try:
-                raw_rows.extend(fetch_tushare_sw2_aggregate(args.date, tushare_token))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"tushare sw2 aggregate failed: {exc}")
-        elif args.date and "industry" in sector_types:
-            errors.append("tushare sw2 aggregate skipped: TUSHARE_TOKEN not set")
+    universe_coverage: Dict[str, Any] = {}
 
     tushare_token = os.getenv("TUSHARE_TOKEN")
+    # 正式行业分析必须先固定申万二级成分集合，再聚合个股资金流。东方财富行业板块
+    # 的成分口径不同，只能在申万聚合不可用时作为非正式降级源。
+    if args.date and tushare_token and sector_types == ["industry"]:
+        try:
+            member_cache = Path(args.member_cache).resolve() if args.member_cache else Path(args.out).resolve().parent / "sw2_members_cache.json"
+            raw_rows.extend(
+                fetch_tushare_sw2_aggregate(
+                    args.date,
+                    tushare_token,
+                    cache_path=member_cache,
+                    quality_out=universe_coverage,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"tushare sw2 aggregate failed: {exc}")
+    elif args.date and "industry" in sector_types and not tushare_token:
+        errors.append("tushare sw2 aggregate skipped: TUSHARE_TOKEN not set")
+
+    if not raw_rows:
+        for label in sector_types:
+            fs = EASTMONEY_SECTOR_FS[label]
+            try:
+                raw_rows.extend(fetch_eastmoney_sector(fs, label))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"eastmoney sector {label} failed: {exc}")
+
+        if raw_rows and args.date:
+            eastmoney_dates = sorted({r.get("数据日期") for r in raw_rows if r.get("数据日期")})
+            if eastmoney_dates != [args.date]:
+                warnings.append(f"eastmoney returned non-target-date data: target={args.date}, data_dates={eastmoney_dates or ['unknown']}")
+                raw_rows = []
+
     primary_stock = config.get("primary_stock")
     if args.date and tushare_token and primary_stock:
         try:
@@ -723,10 +1014,13 @@ def main() -> None:
                 warnings.append("10jqka fallback lacks 超大单（亿）, 大单（亿）, 成交额（亿）, 净流入率 %")
 
     supplement_errors: List[str] = []
-    if raw_rows:
+    supplement_is_same_day = not args.date or args.date == datetime.now().strftime("%Y-%m-%d")
+    if raw_rows and supplement_is_same_day:
         supplements, supplement_errors = build_supplements(sector_types)
         if supplement_errors:
             warnings.extend(supplement_errors)
+    elif raw_rows and args.date:
+        warnings.append("historical report skipped undated real-time sector supplements")
 
     normalized = ensure_required_fund_columns(raw_rows)
     normalized_stock_rows = ensure_required_fund_columns(raw_stock_rows)
@@ -742,7 +1036,14 @@ def main() -> None:
         "supplements": supplements,
         "target_date": args.date,
         "data_dates": data_dates,
-        "quality": assess_fund_flow_quality(normalized, sources, target_date=args.date, data_dates=data_dates),
+        "universe_coverage": universe_coverage,
+        "quality": assess_fund_flow_quality(
+            normalized,
+            sources,
+            target_date=args.date,
+            data_dates=data_dates,
+            universe_coverage=universe_coverage,
+        ),
         "rows": normalized,
         "stock_rows": normalized_stock_rows,
     }

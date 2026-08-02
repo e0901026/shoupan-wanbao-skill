@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -26,7 +27,9 @@ def build_quote_from_tushare_rows(symbol: str, name: str, daily: Dict[str, Any],
         "股票名称": name,
         "股票代码": symbol,
         "交易日期": trade_date_fmt,
+        "前收盘价": to_float(daily.get("pre_close")),
         "收盘价": to_float(daily.get("close")),
+        "涨跌额": to_float(daily.get("change")),
         "涨跌幅": round(to_float(daily.get("pct_chg")) or 0, 2) if daily.get("pct_chg") is not None else None,
         "成交额（亿）": round(amount_qian_yuan / 100000, 2) if amount_qian_yuan is not None else None,
         "PE": to_float(basic.get("pe")),
@@ -62,7 +65,7 @@ def fetch_quotes_by_tushare(stocks: List[Dict[str, Any]], trade_date: str, token
         items = (data.get("data") or {}).get("items") or []
         return [dict(zip(fields_out, item)) for item in items]
 
-    daily_rows = post("daily", "ts_code,trade_date,open,high,low,close,pct_chg,amount")
+    daily_rows = post("daily", "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,amount")
     basic_rows = post("daily_basic", "ts_code,trade_date,turnover_rate,pe,total_mv")
     daily_by_code = {row["ts_code"]: row for row in daily_rows}
     basic_by_code = {row["ts_code"]: row for row in basic_rows}
@@ -160,7 +163,7 @@ def parse_sohu_historical_quote(payload: Any, symbol: str, name: str) -> Dict[st
     }
 
 
-def fetch_quote_by_sohu(symbol: str, name: str, trade_date: str) -> Dict[str, Any]:
+def fetch_quote_by_sohu(symbol: str, name: str, trade_date: str, attempts: int = 3) -> Dict[str, Any]:
     url = "https://q.stock.sohu.com/hisHq"
     date_compact = trade_date.replace("-", "")
     params = {
@@ -172,12 +175,22 @@ def fetch_quote_by_sohu(symbol: str, name: str, trade_date: str) -> Dict[str, An
         "period": "d",
         "rt": "json",
     }
-    resp = market_session().get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-    quote = parse_sohu_historical_quote(resp.json(), symbol, name)
-    if quote.get("交易日期") != trade_date:
-        raise ValueError(f"Sohu quote date mismatch for {symbol}: {quote.get('交易日期')} != {trade_date}")
-    return quote
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            resp = market_session().get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            resp.raise_for_status()
+            quote = parse_sohu_historical_quote(resp.json(), symbol, name)
+            if quote.get("交易日期") != trade_date:
+                raise ValueError(f"Sohu quote date mismatch for {symbol}: {quote.get('交易日期')} != {trade_date}")
+            return quote
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(attempt + 1)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"Sohu quote unavailable for {symbol}")
 
 
 def parse_tencent_quote_line(text: str, symbol: str, name: str) -> Dict[str, Any]:
@@ -228,6 +241,31 @@ def enrich_quote_missing_fields(quote: Dict[str, Any], fallback: Dict[str, Any],
             changed = True
     if changed and source_suffix not in str(quote.get("source", "")):
         quote["source"] = f"{quote.get('source', 'unknown')}+{source_suffix}"
+
+
+def compare_quotes(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    tolerances = {
+        "收盘价": 0.02,
+        "涨跌幅": 0.03,
+        "成交额（亿）": 0.05,
+        "开盘价": 0.02,
+        "最高价": 0.02,
+        "最低价": 0.02,
+    }
+    differences = []
+    for field, tolerance in tolerances.items():
+        left = to_float(primary.get(field))
+        right = to_float(secondary.get(field))
+        if left is None or right is None:
+            continue
+        if abs(left - right) > tolerance:
+            differences.append({"field": field, "primary": left, "secondary": right, "tolerance": tolerance})
+    return {
+        "status": "matched" if not differences else "mismatch",
+        "primary_source": primary.get("source"),
+        "secondary_source": secondary.get("source"),
+        "differences": differences,
+    }
 
 
 def main() -> None:
@@ -286,10 +324,26 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"tencent quote failed for {symbol}: {exc}")
 
+    cross_checks: Dict[str, Dict[str, Any]] = {}
+    primary_stock = config.get("primary_stock") or {}
+    primary_symbol = str(primary_stock.get("symbol") or "")
+    if args.date and primary_symbol and (quotes.get(primary_symbol) or {}).get("收盘价") is not None:
+        try:
+            secondary = fetch_quote_by_sohu(primary_symbol, str(primary_stock.get("name") or primary_symbol), args.date)
+            cross_checks[primary_symbol] = compare_quotes(quotes[primary_symbol], secondary)
+        except Exception as exc:  # noqa: BLE001
+            cross_checks[primary_symbol] = {
+                "status": "unavailable",
+                "primary_source": quotes[primary_symbol].get("source"),
+                "secondary_source": "sohu.hisHq",
+                "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+            }
+
     payload = {
         "generated_at": now_iso(),
         "sources": sorted({q.get("source", "unknown") for q in quotes.values()}),
         "errors": errors,
+        "cross_checks": cross_checks,
         "quotes": quotes,
     }
     write_json(args.out, payload)

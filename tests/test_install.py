@@ -59,6 +59,18 @@ class InstallTest(unittest.TestCase):
 
             self.assertFalse((tmp_path / "config.yaml").exists())
 
+    def test_launchd_command_sources_repo_and_user_env(self) -> None:
+        command = install.build_report_center_command(
+            repo_dir=Path("/repo"),
+            python_path=Path("/python"),
+            env_file=Path("/user/env"),
+        )
+
+        self.assertIn(". /repo/.env", command)
+        self.assertIn(". /user/env", command)
+        self.assertIn("scripts/run_report_center.py", command)
+        self.assertIn("export PYTHONPATH=/repo/scripts:/repo/.deps", command)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,8 @@ class FetchQuotesTest(unittest.TestCase):
                 "high": 1295.0,
                 "low": 1265.01,
                 "close": 1291.91,
+                "pre_close": 1279.0,
+                "change": 12.91,
                 "pct_chg": 1.009,
                 "amount": 6477910.214,
             },
@@ -55,12 +57,23 @@ class FetchQuotesTest(unittest.TestCase):
         )
 
         self.assertEqual(quote["交易日期"], "2026-06-12")
+        self.assertEqual(quote["前收盘价"], 1279.0)
         self.assertEqual(quote["收盘价"], 1291.91)
+        self.assertEqual(quote["涨跌额"], 12.91)
         self.assertEqual(quote["涨跌幅"], 1.01)
         self.assertEqual(quote["成交额（亿）"], 64.78)
         self.assertEqual(quote["PE"], 19.52)
         self.assertEqual(quote["总市值（亿）"], 16149.93)
         self.assertEqual(quote["source"], "tushare.daily+daily_basic")
+
+    def test_compare_quotes_flags_cross_source_mismatch(self) -> None:
+        result = fetch_quotes.compare_quotes(
+            {"收盘价": 1258.99, "涨跌幅": 0.63, "成交额（亿）": 59.88, "source": "tushare"},
+            {"收盘价": 1260.00, "涨跌幅": 0.71, "成交额（亿）": 59.88, "source": "sohu"},
+        )
+
+        self.assertEqual(result["status"], "mismatch")
+        self.assertEqual({item["field"] for item in result["differences"]}, {"收盘价", "涨跌幅"})
 
     def test_parse_tencent_quote_line(self) -> None:
         line = (

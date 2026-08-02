@@ -125,6 +125,113 @@ class FetchSentimentTest(unittest.TestCase):
         self.assertTrue(items[0]["url"].startswith("https://toutiao.com/") or items[0]["url"].startswith("https://weitoutiao.zjurl.cn/"))
         self.assertNotIn("600519", [item["title"] for item in items])
 
+    def test_parse_xueqiu_status_payload_normalizes_posts(self) -> None:
+        payload = {
+            "list": [
+                {
+                    "id": 123,
+                    "text": "<p>贵州茅台今天支撑很稳，长期价值还在</p>",
+                    "created_at": "2026-06-30 10:00:00",
+                    "user": {"id": 88, "screen_name": "雪球散户"},
+                    "reply_count": 3,
+                },
+                {
+                    "id": 124,
+                    "text": "中金维持贵州茅台评级，目标价调整",
+                    "created_at": "2026-06-30 10:00:00",
+                    "user": {"id": 89, "screen_name": "机构搬运"},
+                },
+            ]
+        }
+
+        items = fetch_sentiment.parse_xueqiu_status_payload(payload, symbol="600519", target_date="2026-06-30", lookback_days=1)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["platform"], "雪球")
+        self.assertEqual(items[0]["author"], "雪球散户")
+        self.assertEqual(items[0]["sentiment"], "正向")
+        self.assertTrue(items[0]["url"].startswith("https://xueqiu.com/88/123"))
+
+    def test_fetch_xueqiu_posts_via_cdp_uses_browser_credentials(self) -> None:
+        session = Mock()
+        session.evaluate.return_value = json.dumps(
+            {
+                "status": 200,
+                "contentType": "application/json",
+                "text": json.dumps(
+                    {
+                        "list": [
+                            {
+                                "id": 123,
+                                "text": "贵州茅台扛不住了，风险还没释放",
+                                "created_at": "2026-06-30 10:00:00",
+                                "user": {"id": 88, "screen_name": "雪球用户A"},
+                                "reply_count": 2,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+        with patch("fetch_sentiment.open_cdp_page", return_value=session):
+            items = fetch_sentiment.fetch_xueqiu_posts_via_cdp("贵州茅台", "600519", "2026-06-30", 1, "http://127.0.0.1:9222", max_pages=1)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["platform"], "雪球")
+        self.assertEqual(items[0]["sentiment"], "负向")
+        session.close.assert_called_once()
+
+    def test_fetch_xueqiu_posts_via_opencli_normalizes_comments(self) -> None:
+        payload = [
+            {
+                "author": "雪球用户A",
+                "text": "贵州茅台支撑很稳，长期价值还在",
+                "likes": 5,
+                "replies": 2,
+                "retweets": 0,
+                "created_at": "2026-06-30 10:00",
+                "url": "https://xueqiu.com/88/123",
+            }
+        ]
+        completed = Mock()
+        completed.returncode = 0
+        completed.stdout = json.dumps(payload, ensure_ascii=False)
+        completed.stderr = ""
+
+        with patch("fetch_sentiment.shutil.which", return_value="/usr/local/bin/opencli"), patch("fetch_sentiment.subprocess.run", return_value=completed) as run:
+            items = fetch_sentiment.fetch_xueqiu_posts_via_opencli("600519", "2026-06-30", 1, limit=5, timeout=3)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["platform"], "雪球")
+        self.assertEqual(items[0]["author"], "雪球用户A")
+        self.assertEqual(items[0]["reply_count"], 2)
+        self.assertIn("opencli", run.call_args.args[0][0])
+
+    def test_fetch_xueqiu_posts_via_opencli_surfaces_bridge_failure(self) -> None:
+        completed = Mock()
+        completed.returncode = 69
+        completed.stdout = "ok: false\nerror:\n  code: BROWSER_CONNECT\n  message: Browser Bridge extension not connected"
+        completed.stderr = ""
+
+        with patch("fetch_sentiment.shutil.which", return_value="/usr/local/bin/opencli"), patch("fetch_sentiment.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "Browser Bridge"):
+                fetch_sentiment.fetch_xueqiu_posts_via_opencli("600519", "2026-06-30", 1, limit=5, timeout=3)
+
+    def test_source_status_reports_xueqiu_opencli_cdp_availability(self) -> None:
+        status = fetch_sentiment.build_source_status(
+            [{"platform": "雪球", "source_type": "retail_social_post", "title": "贵州茅台支撑很稳"}],
+            [],
+            opencli_attempted=True,
+            cdp_attempted=True,
+        )
+
+        xueqiu = next(item for item in status if item["source"] == "雪球")
+        self.assertEqual(xueqiu["status"], "可用")
+        self.assertIn("OpenCli", xueqiu["detail"])
+
     def test_main_writes_sentiment_payload_from_eastmoney(self) -> None:
         html = """
         <tr class="listitem">
@@ -144,7 +251,7 @@ class FetchSentimentTest(unittest.TestCase):
             tmp_path = Path(tmp)
             config_path = tmp_path / "config.yaml"
             out_path = tmp_path / "sentiment.json"
-            config_path.write_text("primary_stock:\n  symbol: '600519'\nsentiment:\n  lookback_days: 30\n  max_pages: 1\n", encoding="utf-8")
+            config_path.write_text("primary_stock:\n  symbol: '600519'\nsentiment:\n  lookback_days: 30\n  max_pages: 1\n  xueqiu_opencli_enabled: false\n", encoding="utf-8")
             with patch.object(sys, "argv", ["fetch_sentiment.py", "--config", str(config_path), "--date", "2026-06-12", "--out", str(out_path)]):
                 fetch_sentiment.main()
 

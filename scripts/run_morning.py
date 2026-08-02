@@ -5,6 +5,7 @@ import html
 import json
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -27,6 +28,49 @@ def section(title: str, items: List[Dict[str, Any]], empty: str) -> str:
     return f"<h2>{html.escape(title)}</h2><ul>" + "\n".join(item_line(item) for item in items) + "</ul>"
 
 
+def parse_item_time(item: Dict[str, Any]) -> tuple[datetime | None, bool]:
+    raw = str(item.get("time") or item.get("date") or "").strip()
+    for pattern, date_only in (("%Y-%m-%d %H:%M:%S", False), ("%Y-%m-%d %H:%M", False), ("%Y-%m-%d", True)):
+        try:
+            return datetime.strptime(raw[:19] if pattern.endswith("%S") else raw[:16] if "%H" in pattern else raw[:10], pattern), date_only
+        except ValueError:
+            continue
+    return None, False
+
+
+def filter_items_to_window(items: List[Dict[str, Any]], window_start: str, window_end: str) -> tuple[List[Dict[str, Any]], int]:
+    start = datetime.strptime(window_start, "%Y-%m-%d %H:%M")
+    end = datetime.strptime(window_end, "%Y-%m-%d %H:%M")
+    kept: List[Dict[str, Any]] = []
+    excluded = 0
+    for item in items:
+        published, date_only = parse_item_time(item)
+        if published is None:
+            excluded += 1
+            continue
+        if date_only:
+            valid = start.date() < published.date() < end.date()
+        else:
+            valid = start <= published <= end
+        if valid:
+            kept.append(item)
+        else:
+            excluded += 1
+    return kept, excluded
+
+
+def build_window_sentiment_line(items: List[Dict[str, Any]]) -> str:
+    if not items:
+        return "休市窗口内未取得发布时间可核验的散户评论样本，不能判断散户情绪。"
+    tones = Counter(str(item.get("sentiment") or "中性") for item in items)
+    platforms = Counter(str(item.get("platform") or item.get("source") or "未知来源") for item in items)
+    platform_text = "、".join(f"{name}{count}条" for name, count in platforms.most_common())
+    return (
+        f"休市窗口内有效散户样本{len(items)}条（{platform_text}）："
+        f"正向{tones.get('正向', 0)} / 负向{tones.get('负向', 0)} / 中性{tones.get('中性', 0)}。"
+    )
+
+
 def build_morning_html(
     title_date: str,
     window_start: str,
@@ -37,12 +81,13 @@ def build_morning_html(
     macro: Dict[str, Any],
     corporate_actions: Dict[str, Any],
 ) -> str:
-    news_items = news.get("items") or []
+    news_items, excluded_news = filter_items_to_window(news.get("items") or [], window_start, window_end)
     main_news = [item for item in news_items if item.get("category") == "主标的新闻"]
     industry_news = [item for item in news_items if item.get("category") == "行业新闻"]
     risk_news = [*([item for item in news_items if item.get("category") == "宏观与风险事件"]), *(macro.get("items") or [])]
-    research_items = research.get("items") or []
-    sentiment_line = ((sentiment.get("summary") or {}).get("line") or "休市期间舆论样本暂缺。")
+    research_items, excluded_research = filter_items_to_window(research.get("items") or [], window_start, window_end)
+    sentiment_items, excluded_sentiment = filter_items_to_window(sentiment.get("items") or [], window_start, window_end)
+    sentiment_line = build_window_sentiment_line(sentiment_items)
     action_line = (corporate_actions.get("dividend") or {}).get("line") or (corporate_actions.get("earnings") or {}).get("line") or "休市期间未识别到新的分红/财报动作。"
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -51,6 +96,7 @@ def build_morning_html(
 </head><body>
 <h1>开盘早报 {html.escape(title_date)}</h1>
 <p class="meta">资讯窗口：{html.escape(window_start)} 至 {html.escape(window_end)}。本报告只整理休市期间资讯与风险，不生成未开盘行情或板块资金结论。</p>
+<p class="meta">时间审计：已排除窗口外或发布时间无法核验的新闻 {excluded_news} 条、机构观点 {excluded_research} 条、舆论样本 {excluded_sentiment} 条。</p>
 <div class="card"><b>盘前判断：</b>先检查公告/宏观/舆论是否改变长期价值、行业景气、流动性或风险偏好；开盘后再用实时价格和资金确认。</div>
 <h2>公司行动</h2><p>{html.escape(action_line)}</p>
 {section('主标的新闻', main_news, '窗口内未识别到主标的新闻。')}
@@ -78,16 +124,17 @@ def main() -> None:
     parser.add_argument("--window-start", required=True)
     parser.add_argument("--window-end", required=True)
     parser.add_argument("--out")
-    parser.add_argument("--data-dir", default="data/morning")
+    parser.add_argument("--data-dir")
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
+    data_dir = Path(args.data_dir or f"data/morning/{args.date}")
     data_dir.mkdir(parents=True, exist_ok=True)
     py = sys.executable
-    # The existing fetchers apply their own target-date and lookback filtering. For the morning report,
-    # use a conservative 3-day window around the weekend/holiday gap.
+    start_dt = datetime.strptime(args.window_start, "%Y-%m-%d %H:%M")
+    end_dt = datetime.strptime(args.window_end, "%Y-%m-%d %H:%M")
+    lookback_days = max((end_dt.date() - start_dt.date()).days + 1, 1)
     commands = [
-        [py, "scripts/fetch_news.py", "--config", args.config, "--out", str(data_dir / "news.json"), "--lookback-days", "3", "--date", args.date],
+        [py, "scripts/fetch_news.py", "--config", args.config, "--out", str(data_dir / "news.json"), "--lookback-days", str(lookback_days), "--date", args.date],
         [py, "scripts/fetch_research.py", "--config", args.config, "--out", str(data_dir / "research.json"), "--date", args.date],
         [py, "scripts/fetch_sentiment.py", "--config", args.config, "--out", str(data_dir / "sentiment.json"), "--date", args.date],
         [py, "scripts/fetch_corporate_actions.py", "--config", args.config, "--out", str(data_dir / "corporate_actions.json"), "--date", args.date],

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import re
-from datetime import datetime, timedelta
+import shutil
+import subprocess
+import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
@@ -11,6 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from common import load_yaml, now_iso, to_float, write_json
+from cdp_utils import open_cdp_page
 from fetch_research import compact_text
 
 
@@ -259,6 +265,211 @@ def fetch_toutiao_posts(keyword: str, target_date: str | None, lookback_days: in
     return parse_toutiao_posts(resp.text, keyword=keyword, target_date=target_date, lookback_days=lookback_days)
 
 
+def strip_html_text(value: Any) -> str:
+    soup = BeautifulSoup(str(value or ""), "html.parser")
+    return " ".join(soup.get_text(" ", strip=True).split())
+
+
+def parse_xueqiu_time(value: Any, target_date: str | None) -> str | None:
+    if isinstance(value, (int, float)):
+        seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%a %b %d %H:%M:%S %z %Y"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+    if re.fullmatch(r"\d{2}-\d{2}\s+\d{2}:\d{2}", text):
+        return item_date_from_update(text, target_date)
+    return parse_relative_time(text, target_date)
+
+
+def extract_xueqiu_status_list(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("list", "statuses", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return extract_xueqiu_status_list(data)
+    return []
+
+
+def parse_xueqiu_status_payload(payload: Any, symbol: str, target_date: str | None, lookback_days: int) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for raw in extract_xueqiu_status_list(payload):
+        title = strip_html_text(raw.get("title") or raw.get("text") or raw.get("description"))
+        if len(title) < 6 or any(word in title for word in INSTITUTION_WORDS):
+            continue
+        time_text = parse_xueqiu_time(raw.get("created_at") or raw.get("timeBefore") or raw.get("time"), target_date)
+        if not time_text or not is_within_lookback(time_text, target_date, lookback_days):
+            continue
+        user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+        status_id = raw.get("id") or raw.get("status_id")
+        url = raw.get("target") or raw.get("url") or (f"https://xueqiu.com/{user.get('id')}/{status_id}" if status_id and user.get("id") else "https://xueqiu.com/")
+        items.append(
+            {
+                "platform": "雪球",
+                "source_type": "retail_social_post",
+                "symbol": symbol,
+                "title": compact_text(title, 120),
+                "author": user.get("screen_name") or raw.get("screen_name") or "雪球用户",
+                "time": time_text,
+                "url": urljoin("https://xueqiu.com/", str(url)),
+                "read_count": parse_count(str(raw.get("view_count") or raw.get("viewCount") or 0)),
+                "reply_count": parse_count(str(raw.get("reply_count") or raw.get("replyCount") or raw.get("comments_count") or 0)),
+                "sentiment": classify_retail_sentiment(title),
+            }
+        )
+    by_url: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        by_url[item["url"]] = item
+    return sorted(by_url.values(), key=lambda item: item.get("time") or "", reverse=True)
+
+
+def extract_opencli_rows(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "rows", "items", "results", "comments"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            rows = extract_opencli_rows(value)
+            if rows:
+                return rows
+    return []
+
+
+def parse_xueqiu_opencli_payload(payload: Any, symbol: str, target_date: str | None, lookback_days: int) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for row in extract_opencli_rows(payload):
+        title = strip_html_text(row.get("text") or row.get("title") or row.get("content"))
+        if len(title) < 6 or any(word in title for word in INSTITUTION_WORDS):
+            continue
+        time_text = parse_xueqiu_time(row.get("created_at") or row.get("time") or row.get("date"), target_date)
+        if not time_text or not is_within_lookback(time_text, target_date, lookback_days):
+            continue
+        items.append(
+            {
+                "platform": "雪球",
+                "source_type": "retail_social_post",
+                "symbol": symbol,
+                "title": compact_text(title, 120),
+                "author": str(row.get("author") or row.get("user") or "雪球用户"),
+                "time": time_text,
+                "url": urljoin("https://xueqiu.com/", str(row.get("url") or "")),
+                "read_count": 0,
+                "reply_count": parse_count(str(row.get("replies") or row.get("reply_count") or 0)),
+                "like_count": parse_count(str(row.get("likes") or row.get("like_count") or 0)),
+                "retweet_count": parse_count(str(row.get("retweets") or row.get("retweet_count") or 0)),
+                "sentiment": classify_retail_sentiment(title),
+            }
+        )
+    return sorted({item["url"] or item["title"]: item for item in items}.values(), key=lambda item: item.get("time") or "", reverse=True)
+
+
+def xueqiu_symbol_for(symbol: str) -> str:
+    if symbol.startswith(("5", "6", "9")):
+        return f"SH{symbol}"
+    if symbol.startswith(("0", "1", "2", "3")):
+        return f"SZ{symbol}"
+    return symbol
+
+
+def fetch_xueqiu_posts_via_opencli(
+    symbol: str,
+    target_date: str | None,
+    lookback_days: int,
+    limit: int = 20,
+    timeout: int = 25,
+) -> List[Dict[str, Any]]:
+    if not shutil.which("opencli"):
+        raise RuntimeError("opencli not found in PATH")
+    xueqiu_symbol = xueqiu_symbol_for(symbol)
+    cmd = [
+        "opencli",
+        "xueqiu",
+        "comments",
+        xueqiu_symbol,
+        "--limit",
+        str(limit),
+        "--site-session",
+        "persistent",
+        "--window",
+        "background",
+        "-f",
+        "json",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"opencli xueqiu comments timeout after {timeout}s") from exc
+    if result.returncode != 0:
+        detail = (result.stdout or result.stderr or "").strip()
+        raise RuntimeError(f"opencli xueqiu comments failed: exit {result.returncode}; {compact_text(detail, 220)}")
+    text = result.stdout.strip()
+    if not text:
+        return []
+    payload = json.loads(text)
+    return parse_xueqiu_opencli_payload(payload, symbol=symbol, target_date=target_date, lookback_days=lookback_days)
+
+
+def fetch_xueqiu_posts_via_cdp(
+    keyword: str,
+    symbol: str,
+    target_date: str | None,
+    lookback_days: int,
+    cdp_url: str,
+    max_pages: int = 2,
+) -> List[Dict[str, Any]]:
+    search_url = f"https://xueqiu.com/k?q={quote(keyword)}"
+    xueqiu_symbol = xueqiu_symbol_for(symbol)
+    session = open_cdp_page(cdp_url, search_url)
+    try:
+        time.sleep(2)
+        all_items: List[Dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            api_path = (
+                "/statuses/search.json?"
+                f"count=20&comment=0&symbol={xueqiu_symbol}&hl=0&source=all&sort=time&page={page}&q={quote(keyword)}"
+            )
+            result_text = session.evaluate(
+                f"""
+fetch({json.dumps(api_path)}, {{
+  credentials: 'include',
+  headers: {{'Accept': 'application/json, text/plain, */*'}}
+}}).then(async (r) => {{
+  const text = await r.text();
+  return JSON.stringify({{status: r.status, contentType: r.headers.get('content-type'), text}});
+}})
+""",
+                await_promise=True,
+            )
+            result = json.loads(result_text or "{}")
+            if int(result.get("status") or 0) >= 400:
+                raise RuntimeError(f"xueqiu api status {result.get('status')}")
+            text = result.get("text") or ""
+            if not text.strip():
+                continue
+            payload = json.loads(text)
+            all_items.extend(parse_xueqiu_status_payload(payload, symbol=symbol, target_date=target_date, lookback_days=lookback_days))
+        return sorted({item["url"]: item for item in all_items}.values(), key=lambda item: item.get("time") or "", reverse=True)
+    finally:
+        session.close()
+
+
 def retail_weight(item: Dict[str, Any]) -> float:
     reads = max(int(item.get("read_count") or 0), 0)
     replies = max(int(item.get("reply_count") or 0), 0)
@@ -317,7 +528,13 @@ def build_retail_sentiment_summary(items: List[Dict[str, Any]]) -> Dict[str, Any
     }
 
 
-def build_source_status(items: List[Dict[str, Any]], errors: List[str]) -> List[Dict[str, str]]:
+def build_source_status(
+    items: List[Dict[str, Any]],
+    errors: List[str],
+    opencli_attempted: bool = False,
+    cdp_attempted: bool = False,
+    agentreach_available: bool = False,
+) -> List[Dict[str, str]]:
     platform_counts: Dict[str, int] = {}
     for item in items:
         platform = item.get("platform") or "未知来源"
@@ -333,7 +550,24 @@ def build_source_status(items: List[Dict[str, Any]], errors: List[str]) -> List[
             "status": "可用" if platform_counts.get("今日头条") else "无有效样本",
             "detail": f"微头条搜索页抓取到 {platform_counts.get('今日头条', 0)} 条散户表达。" if platform_counts.get("今日头条") else "微头条搜索页未返回目标日期窗口内样本。",
         },
-        {"source": "雪球", "status": "受 WAF/登录态限制", "detail": "静态搜索页仅返回应用壳，搜索 API 触发 WAF；需稳定 Chrome/CDP 或站内接口后再接入。"},
+        {
+            "source": "雪球",
+            "status": "可用" if platform_counts.get("雪球") else ("OpenCli/CDP未取到有效样本" if (opencli_attempted or cdp_attempted) else "受 WAF/登录态限制"),
+            "detail": (
+                f"OpenCli/CDP 抓取到 {platform_counts.get('雪球', 0)} 条雪球讨论。"
+                if platform_counts.get("雪球")
+                else (
+                    "已按 OpenCli -> CDP 优先级尝试雪球，但未返回目标日期窗口内讨论；OpenCli 需要 Browser Bridge extension，CDP 需要远程调试 Chrome 登录态。"
+                    if (opencli_attempted or cdp_attempted)
+                    else "静态搜索页仅返回应用壳，搜索 API 触发 WAF；优先用 OpenCli xueqiu adapter，其次用 XUEQIU_CDP_URL/CHROME_REMOTE_DEBUGGING_URL 登录态 Chrome/CDP。"
+                )
+            ),
+        },
+        {
+            "source": "Agent Reach",
+            "status": "可用待接入" if agentreach_available else "当前环境未发现",
+            "detail": "OpenCli 和 CDP 都失败时作为第三层兜底；本机未发现 agentreach CLI，当前工具列表也未暴露 Agent Reach connector。" if not agentreach_available else "可作为 OpenCli/CDP 失败后的第三层动态抓取兜底。",
+        },
         {"source": "微博", "status": "受访客系统/登录态限制", "detail": "公开搜索跳转 Sina Visitor System；需登录态搜索或评论接口后再接入。"},
         {"source": "同花顺圈子", "status": "需动态渲染", "detail": "公开 HTML 可访问，但帖子列表未静态渲染。"},
         {"source": "新浪财经评论", "status": "接口可访问", "detail": "可按新闻 newsid 抓评论；本轮样本源优先股吧帖子。"},
@@ -346,10 +580,11 @@ def build_source_status(items: List[Dict[str, Any]], errors: List[str]) -> List[
 def build_quality(items: List[Dict[str, Any]], errors: List[str]) -> Dict[str, Any]:
     if items:
         platforms = sorted({item.get("platform") for item in items if item.get("platform")})
+        has_login_cdp = any(item.get("platform") == "雪球" for item in items)
         return {
             "level": "ok",
-            "source_mode": "retail_public_static_multi_source",
-            "summary": f"散户舆论样本可用，已抓取 {len(items)} 条样本，来源：{'、'.join(platforms)}；雪球/微博仍受登录态或风控限制。",
+            "source_mode": "retail_public_static_plus_login_cdp" if has_login_cdp else "retail_public_static_multi_source",
+            "summary": f"散户舆论样本可用，已抓取 {len(items)} 条样本，来源：{'、'.join(platforms)}。",
             "item_count": len(items),
         }
     return {
@@ -375,9 +610,19 @@ def main() -> None:
     lookback_days = int(sentiment_config.get("lookback_days", 30))
     max_pages = int(sentiment_config.get("max_pages", 3))
     max_items = int(sentiment_config.get("max_items", 40))
+    xueqiu_opencli_enabled = bool(sentiment_config.get("xueqiu_opencli_enabled", True))
+    xueqiu_opencli_timeout = int(sentiment_config.get("xueqiu_opencli_timeout", 12))
+    xueqiu_cdp_url = (
+        str(sentiment_config.get("xueqiu_cdp_url") or "")
+        or os.getenv("XUEQIU_CDP_URL")
+        or os.getenv("CHROME_REMOTE_DEBUGGING_URL")
+    )
 
     errors: List[str] = []
     items: List[Dict[str, Any]] = []
+    opencli_attempted = xueqiu_opencli_enabled
+    cdp_attempted = bool(xueqiu_cdp_url)
+    agentreach_available = bool(shutil.which("agentreach") or shutil.which("agent-reach"))
     try:
         items.extend(fetch_eastmoney_guba_posts(symbol, target_date=args.date, lookback_days=lookback_days, max_pages=max_pages))
     except Exception as exc:  # noqa: BLE001
@@ -386,6 +631,17 @@ def main() -> None:
         items.extend(fetch_toutiao_posts(stock_name, target_date=args.date, lookback_days=lookback_days))
     except Exception as exc:  # noqa: BLE001
         errors.append(f"toutiao search failed for {stock_name}: {exc}")
+    if xueqiu_opencli_enabled:
+        try:
+            items.extend(fetch_xueqiu_posts_via_opencli(symbol=symbol, target_date=args.date, lookback_days=lookback_days, limit=max_items, timeout=xueqiu_opencli_timeout))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"xueqiu opencli failed for {stock_name}: {exc}")
+    has_xueqiu_items = any(item.get("platform") == "雪球" for item in items)
+    if xueqiu_cdp_url and not has_xueqiu_items:
+        try:
+            items.extend(fetch_xueqiu_posts_via_cdp(stock_name, symbol=symbol, target_date=args.date, lookback_days=lookback_days, cdp_url=xueqiu_cdp_url))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"xueqiu cdp failed for {stock_name}: {exc}")
     items = sorted({item["url"]: item for item in items}.values(), key=lambda item: item.get("time") or "", reverse=True)
     items = items[:max_items]
     summary = build_retail_sentiment_summary(items)
@@ -399,7 +655,7 @@ def main() -> None:
             "quality": build_quality(items, errors),
             "lookback_days": lookback_days,
             "summary": summary,
-            "source_status": build_source_status(items, errors),
+            "source_status": build_source_status(items, errors, opencli_attempted=opencli_attempted, cdp_attempted=cdp_attempted, agentreach_available=agentreach_available),
             "items": items,
         },
     )

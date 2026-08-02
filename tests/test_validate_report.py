@@ -91,6 +91,55 @@ class ValidateReportTest(unittest.TestCase):
             self.assertNotEqual(strict_result.returncode, 0)
             self.assertIn("严格资金流门禁失败", strict_result.stdout)
 
+    def test_strict_fund_flow_rejects_complete_noncanonical_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            report = tmp_path / "report.md"
+            analysis = tmp_path / "analysis.json"
+            header = "| 板块 | 净流入（亿） | 超大单（亿） | 大单（亿） | 小单（亿） | 涨跌幅 % | 成交额（亿） | 净流入率 % |"
+            report.write_text(
+                "\n".join(
+                    [
+                        "### 🔥 净流入 TOP 10", header,
+                        "### 💧 净流出 TOP 10", header,
+                        "### 🔴 背离一：净流入 ↗ 但股价跌", header,
+                        "### 🟢 背离二：净流出 ↘ 但股价涨", header,
+                        "### 🔶 背离三：超大单 ↑ + 大单 ↓", header,
+                        "### 🔶 背离四：超大单 ↓ + 大单 ↑", header,
+                        "## 🍶 白酒板块", header,
+                        "## 🧾 数据来源与抓取说明",
+                        "## ⚠️ 风险提示",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            quotes = {symbol: {"收盘价": 1} for symbol in ["600519", "000858", "600809", "000568", "002304"]}
+            row = {"板块": "证券Ⅱ", "净流入（亿）": 1}
+            analysis.write_text(
+                json.dumps(
+                    {
+                        "quotes": {"quotes": quotes},
+                        "fund_flow": {
+                            "quality": {"level": "complete", "source_mode": "eastmoney_industry_board_full_noncanonical"},
+                            "inflow_top5": [row],
+                            "outflow_top5": [row],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/validate_report.py"), "--report", str(report), "--analysis", str(analysis), "--strict-fund-flow"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("正式报告仅接受申万二级成分股聚合口径", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

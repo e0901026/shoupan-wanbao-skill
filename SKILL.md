@@ -71,6 +71,7 @@ Use `scripts/run_daily.py` as the canonical entrypoint:
 - First successful run: pull 30 calendar days of relevant news.
 - Normal subsequent trading-day run: pull only the report date.
 - After market closures: pull from the last successful report date through the current report date, so weekends/holidays are included.
+- Historical backfills must reject search results without a verifiable publication time; never insert current search-page results into a past report.
 
 State is stored in `data/run_state.json` by default.
 
@@ -94,6 +95,24 @@ Brokerage reports, target prices, and ratings must appear only under `机构观�
 
 Do not force weekly-report sections into the daily report. Daily output should explain one trading day with same-day market data, news, sentiment, and source quality.
 
+## Daily Strategy Calibration
+
+Daily reports must consume recent `data/archive/analysis_YYYY-MM-DD.json` history when available and apply the weekly-review calibration rules:
+
+- Put dividends, buybacks, and announcement-style positives into a "whether price and fund flow confirmed it" frame. They are not standalone reasons for a bullish conclusion.
+- If two or more consecutive trading days show `超大单 > 0`, `大单 < 0`, and weak price action, label it as 承接型分歧, not as a trend reversal unless price, turnover, and 白酒Ⅱ fund flow confirm afterward.
+- Sector fund flow must discuss continuity and net-inflow rate. Same-day TOP10 rankings are clues only and cannot replace the multi-day main-line judgment.
+
+## Data Integrity Gates
+
+- Formal industry fund-flow analysis must use a fixed Shenwan Level-2 constituent universe. Eastmoney and Tonghuashun industry boards may be used for cross-checking, but must not be labeled as Shenwan Level-2 or mixed into the formal TOP10 and divergence tables.
+- Fetch the SW2021 Level-2 classification list first, then query `index_member_all` separately for every L2 code. A single unfiltered response can be capped and must never be treated as the complete constituent universe. Merge current and historical rows, apply `in_date/out_date` for the report date, and fail on unresolved multiple active memberships.
+- Tushare `moneyflow` currently covers the traded Shanghai/Shenzhen constituents used by this skill but not the Beijing Stock Exchange constituents. Record the excluded BJ count and turnover coverage for every formal report. Do not describe the aggregation as full-market SW2 coverage.
+- Quotes must retain the previous close and verify `pct_change = (close - previous_close) / previous_close`. On ex-dividend dates, use the quote source's adjusted reference previous close.
+- The primary stock quote must match an independent historical quote source. A mismatch or unavailable second source blocks formal publication after retries.
+- Main net inflow must equal super-large-order net plus large-order net, and net-inflow rate must equal main net inflow divided by turnover.
+- Daily-review conclusions must be generated from the day's price, Baijiu II fund flow, and Kweichow Moutai order-size fund flow. Fixed causal statements that conflict with the data are forbidden.
+
 ## Fund-Flow Rules
 
 All fund-flow tables must contain:
@@ -104,14 +123,15 @@ All fund-flow tables must contain:
 
 Use SW level-2 industry sectors for sector ranking and divergence analysis. Do not mix concept boards, SW level-1, SW level-3, or index boards into industry tables.
 
-Preferred complete sources:
+Preferred formal source:
 
-- Eastmoney SW2 full field endpoint.
-- Tushare fallback aggregation: `moneyflow + daily + index_member_all`, summed by SW2 membership.
+- Tushare aggregation: `moneyflow + daily + index_classify + index_member_all`, with every SW2 code queried separately and membership periods reconciled for the target date.
+
+Eastmoney and Tonghuashun industry-board data are noncanonical supplements only unless their exact SW2 constituent mapping and target date can be verified.
 
 For Tushare moneyflow, bucket definitions are: 小单 `<5万元`, 中单 `5-20万元`, 大单 `20-100万元`, 特大单/超大单 `>=100万元`, based on active buy/sell order statistics. SW2 industry values are sums of constituent-stock bucket net amounts; do not re-bucket by board turnover or one-lot value.
 
-For high-priced stocks such as 贵州茅台 where one board lot already exceeds the 小单 threshold, keep the upstream 小单 field for accounting completeness but do not interpret it as ordinary low-price-stock retail buying. Treat it as the vendor's active-trade bucket based on transaction details, split matching, or odd-lot/fragmented prints; use net flow, 超大单, 大单, turnover, margin financing, and block trades as the primary signal.
+For high-priced stocks such as 贵州茅台 where one board lot already exceeds the 小单 threshold, keep the upstream 小单 field for accounting completeness but do not interpret it as retail buying. The public endpoint does not provide enough raw trade-classification detail to verify why this bucket is nonzero, so do not speculate about its mechanism. Use net flow, 超大单, 大单, turnover, margin financing, and block trades as the primary signal.
 
 AkShare/同花顺 may be used as coverage supplements or degraded drafts. If mandatory fields are missing, strict validation must fail.
 
@@ -121,6 +141,8 @@ Keep these categories separate: official announcements, market/news articles, in
 
 If a source requires login, CAPTCHA, subscription, or user authorization, record it as blocked or ask the user to log in. Do not bypass access controls.
 
+For Xueqiu retail sentiment, static requests may hit Aliyun WAF or return empty anonymous API results. Try `opencli xueqiu comments SYMBOL --site-session persistent` first. If OpenCli Browser Bridge is unavailable, fall back to logged-in Chrome/CDP via `XUEQIU_CDP_URL` or `CHROME_REMOTE_DEBUGGING_URL`. Use Agent Reach only after OpenCli and CDP fail or are unavailable. Do not export cookies; only store normalized public post evidence.
+
 ## Validation
 
 Before presenting a report as final, run:
@@ -128,6 +150,7 @@ Before presenting a report as final, run:
 ```bash
 python -m unittest discover -s tests
 python scripts/validate_report.py --report output/report.md --analysis data/analysis.json --strict-fund-flow
+python scripts/audit_report_history.py --dates YYYY-MM-DD YYYY-MM-DD
 ```
 
 ## Extending Tracked Stocks

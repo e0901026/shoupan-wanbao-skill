@@ -14,6 +14,136 @@ import fetch_sector_fund_flow  # noqa: E402
 
 
 class FetchSectorFundFlowTest(unittest.TestCase):
+    def test_fetch_complete_sw2_member_history_queries_every_l2_code(self) -> None:
+        import pandas as pd
+
+        class FakePro:
+            def __init__(self) -> None:
+                self.member_calls = []
+
+            def index_classify(self, **kwargs):
+                return pd.DataFrame(
+                    [
+                        {"index_code": "801001.SI", "industry_name": "行业一", "level": "L2", "src": "SW2021"},
+                        {"index_code": "801002.SI", "industry_name": "行业二", "level": "L2", "src": "SW2021"},
+                    ]
+                )
+
+            def index_member_all(self, **kwargs):
+                code = kwargs["l2_code"]
+                self.member_calls.append((code, kwargs.get("is_new")))
+                if kwargs.get("is_new") == "N":
+                    return pd.DataFrame([])
+                return pd.DataFrame(
+                    [
+                        {
+                            "l2_code": code,
+                            "l2_name": "行业一" if code == "801001.SI" else "行业二",
+                            "ts_code": "000001.SZ" if code == "801001.SI" else "000002.SZ",
+                            "in_date": "20200101",
+                            "out_date": None,
+                            "is_new": "Y",
+                        }
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            fetch_sector_fund_flow, "SW2_MIN_INDUSTRY_COUNT", 2
+        ), patch.object(fetch_sector_fund_flow, "SW2_MIN_MEMBER_COUNT", 2):
+            pro = FakePro()
+            rows, meta = fetch_sector_fund_flow.fetch_complete_sw2_member_history(
+                pro,
+                Path(tmp) / "members.json",
+            )
+
+        self.assertEqual(
+            pro.member_calls,
+            [("801001.SI", "Y"), ("801001.SI", "N"), ("801002.SI", "Y"), ("801002.SI", "N")],
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(meta["industry_count"], 2)
+        self.assertEqual(meta["member_source"], "tushare.index_member_all.by_l2_code")
+
+    def test_sw2_coverage_rejects_truncated_member_or_moneyflow_universe(self) -> None:
+        members = [
+            {
+                "l2_code": f"L2-{index}",
+                "l2_name": f"行业{index}",
+                "ts_code": f"{index:06d}.SZ",
+                "in_date": "20200101",
+                "out_date": None,
+            }
+            for index in range(10)
+        ]
+        moneyflow = [{"ts_code": f"{index:06d}.SZ"} for index in range(4)]
+
+        with patch.object(fetch_sector_fund_flow, "SW2_MIN_INDUSTRY_COUNT", 10), patch.object(
+            fetch_sector_fund_flow, "SW2_MIN_MEMBER_COUNT", 10
+        ), patch.object(fetch_sector_fund_flow, "SW2_MIN_SUPPORTED_MONEYFLOW_COVERAGE", 0.9):
+            with self.assertRaisesRegex(ValueError, "覆盖校验失败"):
+                fetch_sector_fund_flow.assess_sw2_universe_coverage(
+                    members,
+                    moneyflow,
+                    [{"ts_code": f"{index:06d}.SZ", "amount": 1000} for index in range(10)],
+                    "2026-06-12",
+                    {"industry_count": 10},
+                )
+
+    def test_member_history_out_date_overrides_stale_current_membership(self) -> None:
+        import pandas as pd
+
+        class FakePro:
+            def index_classify(self, **kwargs):
+                return pd.DataFrame([{"index_code": "801001.SI"}])
+
+            def index_member_all(self, **kwargs):
+                if kwargs.get("is_new") == "N":
+                    return pd.DataFrame(
+                        [
+                            {
+                                "l2_code": "801001.SI",
+                                "l2_name": "旧行业",
+                                "ts_code": "000001.SZ",
+                                "in_date": "20200101",
+                                "out_date": "20260630",
+                                "is_new": "N",
+                            }
+                        ]
+                    )
+                return pd.DataFrame(
+                    [
+                        {
+                            "l2_code": "801001.SI",
+                            "l2_name": "旧行业",
+                            "ts_code": "000001.SZ",
+                            "in_date": "20200101",
+                            "out_date": None,
+                            "is_new": "Y",
+                        }
+                    ]
+                )
+
+        with patch.object(fetch_sector_fund_flow, "SW2_MIN_INDUSTRY_COUNT", 1), patch.object(
+            fetch_sector_fund_flow, "SW2_MIN_MEMBER_COUNT", 1
+        ):
+            rows, _ = fetch_sector_fund_flow.fetch_complete_sw2_member_history(FakePro())
+
+        self.assertEqual(rows[0]["out_date"], "20260630")
+        self.assertEqual(fetch_sector_fund_flow.active_sw_member_rows(rows, "2026-07-17"), [])
+
+    def test_reconcile_member_periods_closes_stale_open_membership(self) -> None:
+        rows, repaired = fetch_sector_fund_flow.reconcile_sw2_member_periods(
+            [
+                {"ts_code": "002310.SZ", "l2_code": "801723.SI", "in_date": "20170526", "out_date": None},
+                {"ts_code": "002310.SZ", "l2_code": "801161.SI", "in_date": "20260701", "out_date": None},
+            ]
+        )
+
+        old = next(row for row in rows if row["l2_code"] == "801723.SI")
+        self.assertEqual(old["out_date"], "20260630")
+        self.assertTrue(old["period_reconciled"])
+        self.assertEqual(repaired, 1)
+
     def test_eastmoney_item_to_row_converts_yuan_to_yi_even_for_small_values(self) -> None:
         row = fetch_sector_fund_flow.eastmoney_item_to_row(
             {
@@ -278,10 +408,10 @@ class FetchSectorFundFlowTest(unittest.TestCase):
             }
         ]
 
-        quality = fetch_sector_fund_flow.assess_fund_flow_quality(rows, ["eastmoney.push2.clist.sw2_fund_flow"])
+        quality = fetch_sector_fund_flow.assess_fund_flow_quality(rows, ["eastmoney.push2.clist.industry_board_fund_flow"])
 
-        self.assertEqual(quality["level"], "complete")
-        self.assertEqual(quality["source_mode"], "eastmoney_sw2_full")
+        self.assertEqual(quality["level"], "noncanonical")
+        self.assertEqual(quality["source_mode"], "eastmoney_industry_board_full_noncanonical")
         self.assertEqual(quality["missing_fields"], [])
 
     def test_assess_quality_fails_strict_target_date_mismatch(self) -> None:
@@ -418,7 +548,7 @@ class FetchSectorFundFlowTest(unittest.TestCase):
                     "成交额（亿）": 1200.0,
                     "净流入率 %": -2.78,
                     "数据日期": "2026-06-12",
-                    "source": "eastmoney.push2.clist.sw2_fund_flow",
+                    "source": "eastmoney.push2.clist.industry_board_fund_flow",
                 }
             ]
             ths_rows = [
@@ -449,11 +579,11 @@ class FetchSectorFundFlowTest(unittest.TestCase):
 
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["rows"][0]["净流入（亿）"], -33.38)
-            self.assertEqual(payload["quality"]["source_mode"], "eastmoney_sw2_full")
-            self.assertEqual(payload["supplements"]["coverage"][0]["source"], "akshare.stock_fund_flow_industry")
-            self.assertEqual(payload["supplements"]["coverage"][0]["items"][0]["板块"], "半导体")
+            self.assertEqual(payload["quality"]["source_mode"], "eastmoney_industry_board_full_noncanonical")
+            self.assertEqual(payload["supplements"]["coverage"], [])
+            self.assertIn("historical report skipped", "；".join(payload["warnings"]))
 
-    def test_main_falls_back_to_tushare_when_eastmoney_date_mismatches_target(self) -> None:
+    def test_main_prefers_tushare_sw2_even_when_eastmoney_is_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config_path = tmp_path / "config.yaml"
@@ -473,7 +603,7 @@ class FetchSectorFundFlowTest(unittest.TestCase):
                     "成交额（亿）": 20.0,
                     "净流入率 %": 5.0,
                     "数据日期": "2026-06-12",
-                    "source": "eastmoney.push2.clist.sw2_fund_flow",
+                    "source": "eastmoney.push2.clist.industry_board_fund_flow",
                 }
             ]
             tushare_rows = [
@@ -508,7 +638,6 @@ class FetchSectorFundFlowTest(unittest.TestCase):
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["sources"], ["tushare.moneyflow.sw2_aggregate"])
             self.assertEqual(payload["quality"]["source_mode"], "tushare_sw2_stock_moneyflow_aggregate")
-            self.assertIn("eastmoney returned non-target-date data", "；".join(payload["warnings"]))
 
     def test_main_falls_back_to_eastmoney_stock_moneyflow_when_tushare_stock_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,7 +659,7 @@ class FetchSectorFundFlowTest(unittest.TestCase):
                     "成交额（亿）": 80.0,
                     "净流入率 %": -3.68,
                     "数据日期": "2026-06-16",
-                    "source": "eastmoney.push2.clist.sw2_fund_flow",
+                    "source": "eastmoney.push2.clist.industry_board_fund_flow",
                 }
             ]
             fallback_stock = [

@@ -29,13 +29,17 @@ def write_state(path: str | Path, state: dict) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def archive_daily_artifacts(report_date: str, data_dir: str | Path = "data") -> None:
+def archive_daily_artifacts(
+    report_date: str,
+    data_dir: str | Path = "data",
+    archive_dir: str | Path | None = None,
+) -> None:
     data_path = Path(data_dir)
-    archive_dir = data_path / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = Path(archive_dir) if archive_dir is not None else data_path / "archive"
+    archive_path.mkdir(parents=True, exist_ok=True)
     analysis = data_path / "analysis.json"
     if analysis.exists():
-        shutil.copy2(analysis, archive_dir / f"analysis_{report_date}.json")
+        shutil.copy2(analysis, archive_path / f"analysis_{report_date}.json")
 
 
 def compute_news_lookback_days(report_date: str, state_file: str | Path, initial_days: int = 30) -> int:
@@ -55,6 +59,11 @@ def main() -> None:
     parser.add_argument("--date", help="Report/trading date in YYYY-MM-DD format.")
     parser.add_argument("--state-file", default="data/run_state.json", help="State file used to decide first-run vs incremental news window.")
     parser.add_argument("--initial-news-lookback-days", type=int, default=30, help="News lookback window for the first successful run.")
+    parser.add_argument("--news-lookback-days", type=int, help="Explicit news window override, useful for audited historical backfills.")
+    parser.add_argument("--data-dir", default="data", help="Per-run data directory; use an isolated directory for parallel backfills.")
+    parser.add_argument("--archive-dir", default="data/archive", help="Shared destination for successful dated analysis archives.")
+    parser.add_argument("--report-md", help="Intermediate Markdown path. Defaults to output/report.md for normal runs.")
+    parser.add_argument("--member-cache", default="data/sw2_members_cache.json", help="Shared complete SW2 membership cache.")
     parser.add_argument("--publish-feishu", action="store_true", help="Also run the optional Feishu publisher after HTML generation.")
     parser.add_argument(
         "--allow-degraded-fund-flow",
@@ -68,19 +77,28 @@ def main() -> None:
     py = sys.executable
     report_date = args.date or datetime.now().strftime("%Y-%m-%d")
     html_out = f"output/a_share_evening_report_{report_date}.html"
-    news_lookback_days = compute_news_lookback_days(report_date, args.state_file, initial_days=args.initial_news_lookback_days)
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    report_md = Path(args.report_md or ("output/report.md" if data_dir == Path("data") else data_dir / "report.md"))
+    report_md.parent.mkdir(parents=True, exist_ok=True)
+    news_lookback_days = args.news_lookback_days or compute_news_lookback_days(
+        report_date,
+        args.state_file,
+        initial_days=args.initial_news_lookback_days,
+    )
+    data_file = lambda name: str(data_dir / name)
     commands = [
-        [py, "scripts/fetch_quotes.py", "--config", args.config, "--out", "data/quotes.json"],
-        [py, "scripts/fetch_sector_fund_flow.py", "--config", args.config, "--out", "data/sector_fund_flow.json"],
-        [py, "scripts/fetch_news.py", "--config", args.config, "--out", "data/news.json", "--lookback-days", str(news_lookback_days)],
-        [py, "scripts/fetch_research.py", "--config", args.config, "--out", "data/research.json"],
-        [py, "scripts/fetch_sentiment.py", "--config", args.config, "--out", "data/sentiment.json"],
-        [py, "scripts/fetch_margin_financing.py", "--config", args.config, "--out", "data/margin_financing.json"],
-        [py, "scripts/fetch_corporate_actions.py", "--config", args.config, "--out", "data/corporate_actions.json"],
-        [py, "scripts/fetch_macro.py", "--out", "data/macro.json"],
-        [py, "scripts/analyze_report.py", "--config", args.config, "--data-dir", "data", "--out", "data/analysis.json"],
-        [py, "scripts/render_report.py", "--config", args.config, "--data-dir", "data", "--out", "output/report.md"],
-        [py, "scripts/validate_report.py", "--report", "output/report.md", "--analysis", "data/analysis.json"],
+        [py, "scripts/fetch_quotes.py", "--config", args.config, "--out", data_file("quotes.json")],
+        [py, "scripts/fetch_sector_fund_flow.py", "--config", args.config, "--out", data_file("sector_fund_flow.json"), "--member-cache", args.member_cache],
+        [py, "scripts/fetch_news.py", "--config", args.config, "--out", data_file("news.json"), "--lookback-days", str(news_lookback_days)],
+        [py, "scripts/fetch_research.py", "--config", args.config, "--out", data_file("research.json")],
+        [py, "scripts/fetch_sentiment.py", "--config", args.config, "--out", data_file("sentiment.json")],
+        [py, "scripts/fetch_margin_financing.py", "--config", args.config, "--out", data_file("margin_financing.json")],
+        [py, "scripts/fetch_corporate_actions.py", "--config", args.config, "--out", data_file("corporate_actions.json")],
+        [py, "scripts/fetch_macro.py", "--out", data_file("macro.json")],
+        [py, "scripts/analyze_report.py", "--config", args.config, "--data-dir", str(data_dir), "--out", data_file("analysis.json")],
+        [py, "scripts/render_report.py", "--config", args.config, "--data-dir", str(data_dir), "--out", str(report_md)],
+        [py, "scripts/validate_report.py", "--report", str(report_md), "--analysis", data_file("analysis.json")],
     ]
     if args.date:
         date_aware_scripts = {
@@ -106,7 +124,7 @@ def main() -> None:
                 py,
                 "scripts/render_html.py",
                 "--report",
-                "output/report.md",
+                str(report_md),
                 "--out",
                 html_out,
                 "--title",
@@ -114,12 +132,12 @@ def main() -> None:
             ]
         )
     if args.publish_feishu:
-        commands.append([py, "scripts/publish_feishu_html.py", "--config", args.config, "--html", html_out, "--analysis", "data/analysis.json"])
+        commands.append([py, "scripts/publish_feishu_html.py", "--config", args.config, "--html", html_out, "--analysis", data_file("analysis.json")])
     if not args.no_index:
         commands.append([py, "scripts/render_index.py", "--output-dir", "output"])
     for cmd in commands:
         run(cmd)
-    archive_daily_artifacts(report_date)
+    archive_daily_artifacts(report_date, data_dir=data_dir, archive_dir=args.archive_dir)
     state = read_state(args.state_file)
     state.update(
         {

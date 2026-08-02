@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -11,6 +14,8 @@ import yaml
 
 BASE_REQUIRED_TOKENS = ["TUSHARE_TOKEN"]
 FEISHU_REQUIRED_TOKENS = ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_RECEIVE_ID"]
+DEFAULT_LAUNCHD_LABEL = "com.wubaiqi.a-share-report-center"
+DEFAULT_USER_ENV_FILE = Path.home() / ".config" / "a-share-report-center" / "env"
 
 
 def missing_required_tokens(enable_feishu: bool) -> List[str]:
@@ -18,6 +23,21 @@ def missing_required_tokens(enable_feishu: bool) -> List[str]:
     if enable_feishu:
         required.extend(FEISHU_REQUIRED_TOKENS)
     return [name for name in required if not os.getenv(name)]
+
+
+def load_env_file(path: str | Path) -> None:
+    env_path = Path(path).expanduser()
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def write_config(example_path: str | Path, config_path: str | Path, enable_feishu: bool) -> None:
@@ -38,8 +58,32 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
     return value in {"y", "yes", "是", "需要"}
 
 
-def build_launchd_plist(repo_dir: Path, python_path: Path, label: str = "com.wubaiqi.a-share-report-center") -> str:
+def build_report_center_command(repo_dir: Path, python_path: Path, env_file: Path | None = None) -> str:
     script = repo_dir / "scripts" / "run_report_center.py"
+    env_paths = [repo_dir / ".env"]
+    if env_file:
+        env_paths.append(env_file.expanduser())
+    source_parts = [f'[ -f {shlex.quote(str(path))} ] && . {shlex.quote(str(path))}' for path in env_paths]
+    source_cmd = "; ".join(source_parts)
+    pythonpath = f"{repo_dir / 'scripts'}:{repo_dir / '.deps'}"
+    return (
+        "set -a; "
+        f"{source_cmd}; "
+        "set +a; "
+        f"export PYTHONPATH={shlex.quote(pythonpath)}${{PYTHONPATH:+:$PYTHONPATH}}; "
+        f"exec {shlex.quote(str(python_path))} {shlex.quote(str(script))} "
+        f"--config {shlex.quote(str(repo_dir / 'config.yaml'))} "
+        f"--root {shlex.quote(str(repo_dir))}"
+    )
+
+
+def build_launchd_plist(
+    repo_dir: Path,
+    python_path: Path,
+    label: str = DEFAULT_LAUNCHD_LABEL,
+    env_file: Path | None = DEFAULT_USER_ENV_FILE,
+) -> str:
+    command = html.escape(build_report_center_command(repo_dir=repo_dir, python_path=python_path, env_file=env_file))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,12 +91,9 @@ def build_launchd_plist(repo_dir: Path, python_path: Path, label: str = "com.wub
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{python_path}</string>
-    <string>{script}</string>
-    <string>--config</string>
-    <string>{repo_dir / "config.yaml"}</string>
-    <string>--root</string>
-    <string>{repo_dir}</string>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>{command}</string>
   </array>
   <key>WorkingDirectory</key><string>{repo_dir}</string>
   <key>StartCalendarInterval</key>
@@ -68,11 +109,24 @@ def build_launchd_plist(repo_dir: Path, python_path: Path, label: str = "com.wub
 """
 
 
-def write_launchd_plist(repo_dir: Path, python_path: Path, out_path: Path | None = None) -> Path:
-    out = out_path or (repo_dir / "data" / "com.wubaiqi.a-share-report-center.plist")
+def write_launchd_plist(
+    repo_dir: Path,
+    python_path: Path,
+    out_path: Path | None = None,
+    env_file: Path | None = DEFAULT_USER_ENV_FILE,
+) -> Path:
+    out = out_path or (Path.home() / "Library" / "LaunchAgents" / f"{DEFAULT_LAUNCHD_LABEL}.plist")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build_launchd_plist(repo_dir=repo_dir, python_path=python_path), encoding="utf-8")
+    out.write_text(build_launchd_plist(repo_dir=repo_dir, python_path=python_path, env_file=env_file), encoding="utf-8")
     return out
+
+
+def install_launchd_plist(plist_path: Path, label: str = DEFAULT_LAUNCHD_LABEL) -> None:
+    domain = f"gui/{os.getuid()}"
+    service = f"{domain}/{label}"
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], check=True)
+    subprocess.run(["launchctl", "enable", service], check=False)
 
 
 def main() -> None:
@@ -80,13 +134,18 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--example", default="config.example.yaml")
     parser.add_argument("--enable-feishu", action="store_true", help="Enable Feishu document/card publishing.")
-    parser.add_argument("--install-schedule", action="store_true", help="Write a launchd plist for the report center.")
+    parser.add_argument("--install-schedule", action="store_true", help="Install and load a launchd plist for the report center.")
     parser.add_argument("--schedule-dry-run", action="store_true", help="Print launchd plist instead of writing it.")
+    parser.add_argument("--env-file", default=str(DEFAULT_USER_ENV_FILE), help="User-level env file sourced by launchd, in addition to repo .env.")
     parser.add_argument("--no-prompt", action="store_true", help="Do not ask questions; use flags and fail fast on missing tokens.")
     args = parser.parse_args()
 
+    env_file = Path(args.env_file).expanduser()
+    load_env_file(Path.cwd() / ".env")
+    load_env_file(env_file)
+
     if args.schedule_dry_run and not args.install_schedule:
-        print(build_launchd_plist(repo_dir=Path.cwd(), python_path=Path(sys.executable)))
+        print(build_launchd_plist(repo_dir=Path.cwd(), python_path=Path(sys.executable), env_file=env_file))
         return
 
     enable_feishu = args.enable_feishu
@@ -122,9 +181,10 @@ def main() -> None:
         if args.schedule_dry_run:
             print(plist)
         else:
-            out = write_launchd_plist(repo_dir=repo_dir, python_path=python_path)
-            print(f"已生成 launchd plist：{out}")
-            print(f"可手动安装：launchctl load {out}")
+            out = write_launchd_plist(repo_dir=repo_dir, python_path=python_path, env_file=env_file)
+            install_launchd_plist(out)
+            print(f"已安装并加载 launchd 定时任务：{out}")
+            print("后续由 macOS launchd 自动触发；缺失报告会在下一次触发时补跑。")
 
 
 if __name__ == "__main__":

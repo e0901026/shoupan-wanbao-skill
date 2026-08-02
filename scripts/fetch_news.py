@@ -286,6 +286,9 @@ def enrich_news_item(item: Dict[str, Any]) -> Dict[str, Any]:
     }
     if item.get("institution_view"):
         enriched["institution_view"] = item.get("institution_view")
+    for key in ("event_date", "published_date", "effective_date", "source_urls"):
+        if item.get(key) is not None:
+            enriched[key] = item.get(key)
     enriched["impact_analysis"] = item.get("impact_analysis") or build_investment_analysis(enriched)
     # 兼容旧模板字段。
     enriched["impact"] = item.get("impact") or enriched["impact_analysis"]
@@ -662,12 +665,12 @@ def fetch_sina_stock_news(symbol: str, keywords: List[str], target_date: str | N
     return enriched
 
 
-def build_quality(items: List[Dict[str, Any]], errors: List[str]) -> Dict[str, Any]:
+def build_quality(items: List[Dict[str, Any]], errors: List[str], lookback_days: int = 30) -> Dict[str, Any]:
     if items:
         return {
             "level": "ok",
             "source_mode": "long_term_investor_news_filter",
-            "summary": f"新闻数据可用，已保留 {len(items)} 条近一个月相关公开新闻，并按主标的、行业、宏观风险分组。",
+            "summary": f"新闻数据可用，已保留 {len(items)} 条近 {lookback_days} 个自然日相关公开新闻，并按主标的、行业、宏观风险分组。",
             "item_count": len(items),
         }
     return {
@@ -723,12 +726,15 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         errors.append(f"sina block trade news failed for {primary_symbol}: {exc}")
 
-    for keyword in balanced_search_keywords(keywords, max_search_keywords):
-        try:
-            news.extend(fetch_public_search_stub(keyword, max_items=2))
-            sources.append("东方财富搜索页")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"news search failed for {keyword}: {exc}")
+    # 东方财富公开搜索页不提供可靠发布时间。历史回填时使用它会把当前结果
+    # 混入过去报告，因此仅在最新模式（未指定 --date）下作为补充源。
+    if not args.date:
+        for keyword in balanced_search_keywords(keywords, max_search_keywords):
+            try:
+                news.extend(fetch_public_search_stub(keyword, max_items=2))
+                sources.append("东方财富搜索页")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"news search failed for {keyword}: {exc}")
 
     dedup = deduplicate_and_rank_news(news, max_items=max_items, per_section=per_section)
     sections = group_news_sections(dedup, per_section=per_section)
@@ -739,7 +745,7 @@ def main() -> None:
             "generated_at": now_iso(),
             "sources": sources or ["新浪财经个股资讯 / 东方财富搜索页"],
             "errors": errors,
-            "quality": build_quality(dedup, errors),
+            "quality": build_quality(dedup, errors, lookback_days=lookback_days),
             "brief": build_news_brief(dedup),
             "lookback_days": lookback_days,
             "sections": sections,

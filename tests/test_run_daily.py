@@ -48,6 +48,7 @@ class RunDailyTest(unittest.TestCase):
                     ["run_daily.py", "--config", "config.yaml", "--date", "2026-06-12", "--state-file", str(state_file)],
                 ),
                 patch("subprocess.run", side_effect=fake_run),
+                patch.object(run_daily, "archive_daily_artifacts"),
             ):
                 run_daily.main()
 
@@ -104,6 +105,7 @@ class RunDailyTest(unittest.TestCase):
                     ],
                 ),
                 patch("subprocess.run", side_effect=fake_run),
+                patch.object(run_daily, "archive_daily_artifacts"),
             ):
                 run_daily.main()
 
@@ -130,6 +132,7 @@ class RunDailyTest(unittest.TestCase):
                     ["run_daily.py", "--config", "config.yaml", "--date", "2026-06-12", "--publish-feishu", "--state-file", str(state_file)],
                 ),
                 patch("subprocess.run", side_effect=fake_run),
+                patch.object(run_daily, "archive_daily_artifacts"),
             ):
                 run_daily.main()
 

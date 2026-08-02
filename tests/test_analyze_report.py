@@ -16,6 +16,9 @@ import analyze_report  # noqa: E402
 
 
 class AnalyzeReportTest(unittest.TestCase):
+    def test_fmt_signed_normalizes_negative_zero(self) -> None:
+        self.assertEqual(analyze_report.fmt_signed(-0.004, "亿"), "0.00亿")
+
     def test_build_market_summary_uses_quote_and_fund_flow_data(self) -> None:
         summary = analyze_report.build_market_summary(
             {
@@ -168,6 +171,157 @@ class AnalyzeReportTest(unittest.TestCase):
         self.assertIn("大单20-100万元", summary)
         self.assertIn("特大单/超大单>=100万元", summary)
         self.assertIn("主动买卖单", summary)
+
+    def test_daily_strategy_adjustments_require_price_and_fund_confirmation_for_dividend(self) -> None:
+        analysis = {
+            "fund_flow": {
+                "quality": {"target_date": "2026-07-10"},
+                "baijiu": [
+                    {"板块": "白酒Ⅱ", "净流入（亿）": -2.0, "涨跌幅 %": -1.0, "净流入率 %": -1.2},
+                    {"板块": "贵州茅台", "净流入（亿）": -0.5, "超大单（亿）": 0.3, "大单（亿）": -0.8, "涨跌幅 %": -0.6},
+                ],
+            },
+            "quotes": {"quotes": {"600519": {"涨跌幅": -0.6}}},
+            "corporate_actions": {"dividend": {"cash_dividend_per_share": 28.02}},
+        }
+
+        lines = analyze_report.build_daily_strategy_adjustments(analysis)
+
+        self.assertTrue(any("不能单独当成上涨理由" in line for line in lines))
+        self.assertTrue(any("价格" in line and "茅台主力资金" in line and "白酒Ⅱ资金/涨跌" in line for line in lines))
+
+    def test_daily_strategy_adjustments_marks_two_day_carrying_divergence(self) -> None:
+        previous = {
+            "fund_flow": {
+                "quality": {"target_date": "2026-07-09"},
+                "baijiu": [
+                    {"板块": "白酒Ⅱ", "净流入（亿）": -1.0, "涨跌幅 %": -0.8, "净流入率 %": -0.5},
+                    {"板块": "贵州茅台", "净流入（亿）": -0.2, "超大单（亿）": 0.6, "大单（亿）": -0.8, "涨跌幅 %": -0.3},
+                ],
+            },
+            "quotes": {"quotes": {"600519": {"涨跌幅": -0.3}}},
+        }
+        current = {
+            "fund_flow": {
+                "quality": {"target_date": "2026-07-10"},
+                "baijiu": [
+                    {"板块": "白酒Ⅱ", "净流入（亿）": -2.0, "涨跌幅 %": -1.0, "净流入率 %": -1.2},
+                    {"板块": "贵州茅台", "净流入（亿）": -0.4, "超大单（亿）": 0.5, "大单（亿）": -0.9, "涨跌幅 %": -0.4},
+                ],
+            },
+            "quotes": {"quotes": {"600519": {"涨跌幅": -0.4}}},
+        }
+
+        lines = analyze_report.build_daily_strategy_adjustments(current, history=[previous])
+
+        self.assertTrue(any("连续2个交易日" in line and "承接型分歧" in line for line in lines))
+        self.assertTrue(any("单日TOP10只作线索" in line for line in lines))
+
+    def test_daily_strategy_adjustments_excludes_incompatible_sector_sources(self) -> None:
+        history = [
+            {
+                "fund_flow": {
+                    "quality": {"source_mode": "eastmoney_industry_board_full_noncanonical", "target_date": "2026-07-10"},
+                    "baijiu": [{"板块": "白酒Ⅱ", "净流入（亿）": 100.0, "净流入率 %": 50.0}],
+                },
+                "quotes": {"quotes": {"600519": {"涨跌幅": 1.0}}},
+            },
+            {
+                "fund_flow": {
+                    "quality": {"source_mode": "tushare_sw2_stock_moneyflow_aggregate", "target_date": "2026-07-14"},
+                    "baijiu": [{"板块": "白酒Ⅱ", "净流入（亿）": 1.0, "净流入率 %": 1.0}],
+                },
+                "quotes": {"quotes": {"600519": {"涨跌幅": 1.0}}},
+            },
+        ]
+        current = {
+            "fund_flow": {
+                "quality": {"source_mode": "tushare_sw2_stock_moneyflow_aggregate", "target_date": "2026-07-15"},
+                "baijiu": [{"板块": "白酒Ⅱ", "净流入（亿）": 2.0, "净流入率 %": 2.0}],
+            },
+            "quotes": {"quotes": {"600519": {"涨跌幅": 1.0}}},
+        }
+
+        lines = analyze_report.build_daily_strategy_adjustments(current, history=history)
+
+        continuity = next(line for line in lines if "可比交易日" in line)
+        self.assertIn("近2个可比交易日", continuity)
+        self.assertIn("累计主力净流入+3.00亿", continuity)
+        self.assertNotIn("+103.00亿", continuity)
+
+    def test_daily_review_title_follows_price_direction_and_includes_adjustments(self) -> None:
+        analysis = {
+            "quotes": {"quotes": {"600519": {"涨跌幅": 1.2, "前收盘价": 1185.77, "收盘价": 1200, "开盘价": 1180, "最高价": 1200, "最低价": 1170}}},
+            "fund_flow": {
+                "baijiu": [
+                    {"板块": "白酒Ⅱ", "净流入（亿）": 3.0, "涨跌幅 %": 1.0},
+                    {"板块": "贵州茅台", "净流入（亿）": 0.2, "超大单（亿）": 0.1, "大单（亿）": 0.1, "小单（亿）": -0.01},
+                ],
+                "inflow_top5": [{"板块": "证券Ⅱ", "净流入（亿）": 10}],
+            },
+            "macro": {"items": []},
+            "summary": {"fund_sentiment_line": "偏强：测试。"},
+            "daily_strategy_adjustments": ["策略校正：测试。"],
+        }
+
+        review = analyze_report.build_daily_review(analysis)
+
+        self.assertEqual(review["title"], "今日复盘：今日上涨的核心原因")
+        self.assertIn("策略校正：测试。", review["lines"])
+        self.assertIn("价格与白酒Ⅱ同步走强", review["lines"][0])
+        self.assertTrue(any("前收1185.77" in line for line in review["lines"]))
+
+    def test_quote_sanity_issues_detects_pct_mismatch(self) -> None:
+        issues = analyze_report.quote_sanity_issues(
+            {
+                "quotes": {
+                    "600519": {
+                        "前收盘价": 100.0,
+                        "收盘价": 101.0,
+                        "涨跌幅": 2.0,
+                        "开盘价": 100.0,
+                        "最高价": 102.0,
+                        "最低价": 99.0,
+                        "成交额（亿）": 1.0,
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(issues[0]["type"], "quote_pct_mismatch")
+        self.assertEqual(issues[0]["expected_pct"], 1.0)
+
+    def test_quote_sanity_issues_detects_cross_source_mismatch(self) -> None:
+        issues = analyze_report.quote_sanity_issues(
+            {
+                "quotes": {},
+                "cross_checks": {
+                    "600519": {
+                        "status": "mismatch",
+                        "differences": [{"field": "收盘价", "primary": 1258.99, "secondary": 1260.0}],
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(issues[0]["type"], "quote_cross_source_mismatch")
+
+    def test_quote_sanity_issues_rejects_unavailable_cross_source(self) -> None:
+        issues = analyze_report.quote_sanity_issues(
+            {"quotes": {}, "cross_checks": {"600519": {"status": "unavailable"}}}
+        )
+
+        self.assertEqual(issues[0]["type"], "quote_cross_source_unavailable")
+
+    def test_evidence_sanity_rejects_future_dated_items(self) -> None:
+        issues = analyze_report.evidence_sanity_issues(
+            "2026-07-17",
+            {"items": [{"title": "未来新闻", "time": "2026-07-18 09:00", "url": "https://example.com"}]},
+            {"items": []},
+            {"items": []},
+        )
+
+        self.assertEqual(issues[0]["type"], "future_dated_evidence")
 
     def test_main_uses_separate_top_n_for_inflow_outflow_and_divergences(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

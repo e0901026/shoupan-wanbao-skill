@@ -14,6 +14,8 @@ This skill generates one weekly report from completed daily closing reports. It 
 
 Daily reports provide facts. The weekly report reviews, aggregates, corrects, and interprets the week.
 
+Formal weekly generation must reject any daily archive that fails `scripts/audit_report_history.py`. Do not aggregate a report with an unavailable quote cross-check, a noncanonical industry source, a broken main-flow equation, an invalid divergence condition, or missing `白酒Ⅱ` / `贵州茅台` fixed-observation rows.
+
 ## Inputs And Output
 
 Run from the repo root:
@@ -95,5 +97,6 @@ Before presenting the weekly report as final:
 
 ```bash
 python -m unittest tests.test_report_center
+python scripts/audit_report_history.py --dates START ... END
 python scripts/run_weekly.py --root . --dates START ... END --output-dir output
 ```

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import csv
+import io
+import subprocess
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -12,6 +16,7 @@ from fetch_news import enrich_news_item
 
 
 FED_H15_URL = "https://www.federalreserve.gov/releases/h15/"
+FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FED_FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 BLS_RELEASE_SCHEDULE_URL = "https://www.bls.gov/schedule/news_release/current_year.asp"
 BLS_EMPLOYMENT_SCHEDULE_URL = "https://www.bls.gov/schedule/news_release/empsit.htm"
@@ -19,6 +24,7 @@ BLS_CPI_URL = "https://www.bls.gov/news.release/cpi.nr0.htm"
 BEA_PCE_URL = "https://www.bea.gov/data/personal-consumption-expenditures-price-index"
 BOJ_POLICY_RELEASE_URL = "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260616a.pdf"
 BOJ_RELEASES_2026_URL = "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/index.htm"
+BOJ_MEETING_SCHEDULE_URL = "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm"
 XINHUA_US_IRAN_URL = "https://www.news.cn/world/20260615/9f8b392a794447dc835714fcacc0cc97/c.html"
 FTSE_CHINA_A50_REVIEW_URL = "https://www.lseg.com/en/media-centre/press-releases/ftse-russell/2026/ftse-china-index-series-quarterly-review-q2-2026"
 SSE_CLOSING_AUCTION_URL = "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20180806_4607055.shtml"
@@ -208,6 +214,8 @@ def build_boj_policy_item(target_date: str | None) -> Dict[str, Any] | None:
             "若日元利率上行或购债收缩，可能推高日元资金成本、扰动套息交易，并通过全球流动性影响A股风险偏好。"
         )
         direction = "待观察"
+        evidence_time = target_date
+        source_url = BOJ_MEETING_SCHEDULE_URL
     else:
         title = "日本央行加息：日元政策利率上调至1.0%，全球流动性压力需跟踪"
         summary = (
@@ -216,12 +224,15 @@ def build_boj_policy_item(target_date: str | None) -> Dict[str, Any] | None:
             "但会通过日元融资成本、套息交易平仓、全球债券收益率和风险偏好影响资金流向。"
         )
         direction = "利空"
+        evidence_time = "2026-06-16"
+        source_url = BOJ_POLICY_RELEASE_URL
     return enrich_news_item(
         {
             "title": title,
             "source": "Bank of Japan",
-            "time": "2026-06-16",
-            "url": BOJ_POLICY_RELEASE_URL,
+            "time": evidence_time,
+            "event_date": "2026-06-16",
+            "url": source_url,
             "category": "宏观与风险事件",
             "summary": summary,
             "impact_direction": direction,
@@ -258,7 +269,8 @@ def build_market_structure_items(target_date: str | None) -> List[Dict[str, Any]
                 enrich_news_item(
                     {
                         **event,
-                        "time": event["effective_date"],
+                        "time": event["published_date"],
+                        "event_date": event["effective_date"],
                         "category": "宏观与风险事件",
                     }
                 )
@@ -377,6 +389,51 @@ def fetch_h15() -> Dict[str, Any]:
     return parse_h15_html(resp.text)
 
 
+def fetch_fred_series(series: str, target_date: str, lookback_days: int = 14) -> List[tuple[str, float]]:
+    target = datetime.strptime(target_date, "%Y-%m-%d").date()
+    start = target - timedelta(days=lookback_days)
+    url = FRED_CSV_URL + "?" + urlencode(
+        {"id": series, "cosd": start.strftime("%Y-%m-%d"), "coed": target_date}
+    )
+    completed = subprocess.run(
+        ["curl", "-L", "--fail", "--silent", "--show-error", "--retry", "3", "--max-time", "60", url],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = csv.DictReader(io.StringIO(completed.stdout))
+    observations: List[tuple[str, float]] = []
+    for row in rows:
+        date = str(row.get("observation_date") or "")
+        raw = str(row.get(series) or "").strip()
+        if date and raw not in {"", "."} and date <= target_date:
+            observations.append((date, float(raw)))
+    if not observations:
+        raise ValueError(f"FRED {series} has no observation through {target_date}")
+    return observations
+
+
+def fetch_h15_as_of(target_date: str) -> Dict[str, Any]:
+    series_map = {
+        "DFF": "effective_federal_funds_rate",
+        "DGS2": "treasury_2y_year",
+        "DGS10": "treasury_10y_year",
+        "DGS30": "treasury_30y_year",
+    }
+    result: Dict[str, Any] = {"source_url": FRED_CSV_URL, "as_of_date": target_date}
+    latest_dates: List[str] = []
+    for series, key in series_map.items():
+        observations = fetch_fred_series(series, target_date)
+        latest_date, latest = observations[-1]
+        result[key] = latest
+        result[f"{key}_observation_date"] = latest_date
+        latest_dates.append(latest_date)
+        if key.startswith("treasury_") and len(observations) >= 2:
+            result[f"{key}_change_bp"] = round((latest - observations[-2][1]) * 100, 1)
+    result["latest_date"] = max(latest_dates) if latest_dates else target_date
+    return result
+
+
 def build_quality(items: List[Dict[str, Any]], errors: List[str]) -> Dict[str, Any]:
     if items:
         return {
@@ -405,12 +462,12 @@ def main() -> None:
     items: List[Dict[str, Any]] = []
     sources: List[str] = []
     try:
-        h15 = fetch_h15()
+        h15 = fetch_h15_as_of(args.date) if args.date else fetch_h15()
     except Exception as exc:  # noqa: BLE001
         errors.append(f"federal reserve h15 failed: {exc}")
     items = build_macro_items(h15, args.date)
     if h15:
-        sources.extend(["Federal Reserve H.15"])
+        sources.extend(["Federal Reserve H.15 / FRED"])
     if any("FOMC" in item.get("title", "") for item in items):
         sources.append("Federal Reserve FOMC Calendar")
     if any("未来宏观数据窗口" in item.get("title", "") for item in items):

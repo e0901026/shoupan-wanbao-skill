@@ -81,6 +81,8 @@ def fmt_signed(value: Any, suffix: str = "") -> str:
     n = to_float(value)
     if n is None:
         return "暂缺"
+    if round(n, 2) == 0:
+        n = 0.0
     sign = "+" if n > 0 else ""
     return f"{sign}{n:.2f}{suffix}"
 
@@ -88,6 +90,136 @@ def fmt_signed(value: Any, suffix: str = "") -> str:
 def sort_rows(rows: List[Dict[str, Any]], key: str, reverse: bool = True, n: int = 5) -> List[Dict[str, Any]]:
     valid = [r for r in rows if to_float(r.get(key)) is not None]
     return sorted(valid, key=lambda r: to_float(r.get(key)) or 0, reverse=reverse)[:n]
+
+
+def report_date_from_analysis(analysis: Dict[str, Any]) -> str | None:
+    quality = ((analysis.get("fund_flow") or {}).get("quality") or {})
+    for key in ("target_date", "data_date"):
+        value = quality.get(key)
+        if value:
+            return str(value)[:10]
+    data_dates = quality.get("data_dates") or []
+    if data_dates:
+        return str(data_dates[0])[:10]
+    return None
+
+
+def load_recent_archives(data_dir: Path, current_date: str | None, limit: int = 5) -> List[Dict[str, Any]]:
+    if not current_date:
+        return []
+    archive_dir = data_dir / "archive"
+    if not archive_dir.exists():
+        return []
+    archives: List[Dict[str, Any]] = []
+    for path in sorted(archive_dir.glob("analysis_*.json"), reverse=True):
+        date = path.stem.replace("analysis_", "")
+        if date >= current_date:
+            continue
+        item = read_json(path, default={}) or {}
+        if item:
+            archives.append(item)
+        if len(archives) >= limit:
+            break
+    return list(reversed(archives))
+
+
+def moutai_baijiu_snapshot(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    quotes = analysis.get("quotes") or {}
+    primary = (quotes.get("quotes") or {}).get("600519", {})
+    fund_flow = analysis.get("fund_flow") or {}
+    baijiu_rows_ = fund_flow.get("baijiu") or []
+    baijiu = first_row_named(baijiu_rows_, "白酒Ⅱ") or (baijiu_rows_[0] if baijiu_rows_ else {})
+    moutai = first_row_named(baijiu_rows_, "贵州茅台") or {}
+    return {
+        "date": report_date_from_analysis(analysis),
+        "source_mode": (fund_flow.get("quality") or {}).get("source_mode"),
+        "moutai_pct": to_float(primary.get("涨跌幅") if primary else moutai.get("涨跌幅 %")),
+        "moutai_net": to_float(moutai.get("净流入（亿）")),
+        "moutai_super": to_float(moutai.get("超大单（亿）")),
+        "moutai_large": to_float(moutai.get("大单（亿）")),
+        "moutai_amount": to_float(moutai.get("成交额（亿）") or primary.get("成交额（亿）")),
+        "moutai_rate": to_float(moutai.get("净流入率 %")),
+        "baijiu_net": to_float(baijiu.get("净流入（亿）")),
+        "baijiu_pct": to_float(baijiu.get("涨跌幅 %")),
+        "baijiu_amount": to_float(baijiu.get("成交额（亿）")),
+        "baijiu_rate": to_float(baijiu.get("净流入率 %")),
+    }
+
+
+def has_corporate_positive_event(analysis: Dict[str, Any]) -> bool:
+    actions = analysis.get("corporate_actions") or {}
+    if actions.get("dividend") or actions.get("buyback"):
+        return True
+    keyword_re = re.compile(r"分红|派息|权益分派|回购|增持|公告|股东大会")
+    news = analysis.get("news") or {}
+    items = list(news.get("items") or [])
+    for section in news.get("sections") or []:
+        items.extend(section.get("items") or [])
+    return any(keyword_re.search(f"{item.get('title') or ''} {item.get('summary') or ''}") for item in items)
+
+
+def is_carrying_divergence(snapshot: Dict[str, Any]) -> bool:
+    pct = snapshot.get("moutai_pct")
+    return (
+        (snapshot.get("moutai_super") or 0) > 0
+        and (snapshot.get("moutai_large") or 0) < 0
+        and pct is not None
+        and pct <= 0
+    )
+
+
+def build_daily_strategy_adjustments(analysis: Dict[str, Any], history: List[Dict[str, Any]] | None = None) -> List[str]:
+    history = history or []
+    snapshots = [moutai_baijiu_snapshot(item) for item in history[-4:]]
+    current = moutai_baijiu_snapshot(analysis)
+    current_source_mode = current.get("source_mode")
+    if current_source_mode:
+        snapshots = [item for item in snapshots if item.get("source_mode") == current_source_mode]
+    all_snapshots = [item for item in [*snapshots, current] if item]
+    lines: List[str] = []
+
+    if has_corporate_positive_event(analysis):
+        price_ok = (current.get("moutai_pct") or 0) > 0
+        stock_fund_ok = (current.get("moutai_net") or 0) > 0
+        sector_ok = (current.get("baijiu_net") or 0) > 0 and (current.get("baijiu_pct") or 0) > 0
+        if price_ok and stock_fund_ok and sector_ok:
+            lines.append("策略校正：分红、回购或公告类利好今日获得价格、茅台主力资金和白酒Ⅱ同步确认，可以作为顺风因素，但仍不是单独上涨理由。")
+        else:
+            missing = []
+            if not price_ok:
+                missing.append("价格")
+            if not stock_fund_ok:
+                missing.append("茅台主力资金")
+            if not sector_ok:
+                missing.append("白酒Ⅱ资金/涨跌")
+            lines.append(f"策略校正：分红、回购或公告类利好尚未被{'、'.join(missing)}同步确认，不能单独当成上涨理由。")
+
+    streak = 0
+    for snapshot in reversed(all_snapshots):
+        if is_carrying_divergence(snapshot):
+            streak += 1
+        else:
+            break
+    if streak >= 2:
+        lines.append(
+            f"策略校正：已连续{streak}个交易日出现“超大单为正、大单为负、价格偏弱”，优先标注为承接型分歧；只有后续价格、成交额和白酒Ⅱ资金同步转强，才考虑趋势反转。"
+        )
+
+    recent = all_snapshots[-5:]
+    baijiu_rates = [item.get("baijiu_rate") for item in recent if item.get("baijiu_rate") is not None]
+    baijiu_nets = [item.get("baijiu_net") for item in recent if item.get("baijiu_net") is not None]
+    if len(baijiu_nets) >= 2:
+        inflow_days = sum(1 for value in baijiu_nets if value > 0)
+        outflow_days = sum(1 for value in baijiu_nets if value < 0)
+        net_total = sum(baijiu_nets)
+        rate_text = ""
+        if baijiu_rates:
+            rate_text = f"，净流入率区间{min(baijiu_rates):.2f}%到{max(baijiu_rates):.2f}%"
+        lines.append(
+            f"策略校正：近{len(baijiu_nets)}个可比交易日白酒Ⅱ净流入{inflow_days}天、净流出{outflow_days}天，累计主力净流入{fmt_signed(net_total, '亿')}{rate_text}；单日TOP10只作线索，日报主线以连续性和净流入率确认。"
+        )
+
+    return lines
 
 
 def filter_rows(rows: List[Dict[str, Any]], condition) -> List[Dict[str, Any]]:
@@ -602,6 +734,109 @@ def fund_flow_sanity_issues(rows: List[Dict[str, Any]], baijiu: List[Dict[str, A
     return issues
 
 
+def quote_sanity_issues(quotes: Dict[str, Any]) -> List[Dict[str, Any]]:
+    issues: List[Dict[str, Any]] = []
+    for symbol, quote in (quotes.get("quotes") or {}).items():
+        close = to_float(quote.get("收盘价"))
+        pre_close = to_float(quote.get("前收盘价"))
+        pct = to_float(quote.get("涨跌幅"))
+        open_price = to_float(quote.get("开盘价"))
+        high = to_float(quote.get("最高价"))
+        low = to_float(quote.get("最低价"))
+        amount = to_float(quote.get("成交额（亿）"))
+        if close is not None and pre_close not in (None, 0) and pct is not None:
+            expected_pct = round((close - pre_close) / pre_close * 100, 2)
+            if abs(expected_pct - pct) > 0.03:
+                issues.append(
+                    {
+                        "type": "quote_pct_mismatch",
+                        "symbol": symbol,
+                        "close": close,
+                        "pre_close": pre_close,
+                        "actual_pct": pct,
+                        "expected_pct": expected_pct,
+                        "message": "涨跌幅与收盘价/前收盘价不一致",
+                    }
+                )
+        if None not in (open_price, high, low, close) and not (
+            high >= max(open_price, close) and low <= min(open_price, close) and high >= low
+        ):
+            issues.append(
+                {
+                    "type": "quote_ohlc_mismatch",
+                    "symbol": symbol,
+                    "message": "开高低收不满足价格区间约束",
+                }
+            )
+        if amount is not None and amount < 0:
+            issues.append(
+                {
+                    "type": "quote_negative_amount",
+                    "symbol": symbol,
+                    "amount": amount,
+                    "message": "成交额不能为负数",
+                }
+            )
+    for symbol, check in (quotes.get("cross_checks") or {}).items():
+        if check.get("status") != "matched":
+            issues.append(
+                {
+                    "type": "quote_cross_source_mismatch" if check.get("status") == "mismatch" else "quote_cross_source_unavailable",
+                    "symbol": symbol,
+                    "differences": check.get("differences") or [],
+                    "message": "主标的行情跨数据源核对不一致"
+                    if check.get("status") == "mismatch"
+                    else "主标的第二行情源不可用，未完成跨源核验",
+                }
+            )
+    return issues
+
+
+def evidence_sanity_issues(
+    report_date: str | None,
+    news: Dict[str, Any],
+    research: Dict[str, Any],
+    sentiment: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if not report_date:
+        return []
+    issues: List[Dict[str, Any]] = []
+
+    def item_date(item: Dict[str, Any]) -> str | None:
+        text = str(item.get("time") or item.get("date") or item.get("published_at") or "")
+        match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+        return match.group(1) if match else None
+
+    collections = [
+        ("news", news.get("items") or []),
+        ("block_trade", news.get("block_trades") or []),
+        ("research", research.get("items") or []),
+        ("sentiment", sentiment.get("items") or []),
+    ]
+    for section in news.get("sections") or []:
+        collections.append(("news_section", section.get("items") or []))
+    seen = set()
+    for category, items in collections:
+        for item in items:
+            key = (category, item.get("url"), item.get("title"), item_date(item))
+            if key in seen:
+                continue
+            seen.add(key)
+            published = item_date(item)
+            if published and published > report_date:
+                issues.append(
+                    {
+                        "type": "future_dated_evidence",
+                        "category": category,
+                        "title": item.get("title"),
+                        "published": published,
+                        "report_date": report_date,
+                        "message": "历史报告包含报告日之后发布的证据",
+                    }
+                )
+    return issues
+
+
 def normalize_fund_flow_quality(sector: Dict[str, Any]) -> Dict[str, Any]:
     quality = dict(sector.get("quality") or {})
     if quality.get("source_mode") != "tushare_sw2_stock_moneyflow_aggregate":
@@ -612,6 +847,17 @@ def normalize_fund_flow_quality(sector: Dict[str, Any]) -> Dict[str, Any]:
             "申万二级行业资金流由 Tushare moneyflow 个股资金流按申万二级成分股聚合；"
             "Tushare 金额分档为小单<5万元、中单5-20万元、大单20-100万元、特大单/超大单>=100万元，"
             "基于主动买卖单统计；行业表按成分股档位净额加总，不按板块成交或一手金额重新分档。"
+        )
+        summary = quality["summary"]
+    coverage = sector.get("universe_coverage") or {}
+    if coverage.get("status") == "complete" and "覆盖审计" not in summary:
+        turnover_coverage = to_float(coverage.get("turnover_coverage"))
+        quality["summary"] = summary + (
+            f" 覆盖审计：申万二级分类{int(coverage.get('industry_count') or 0)}个，"
+            f"当日有效行业{int(coverage.get('active_industry_count') or 0)}个，"
+            f"沪深成交成分资金流覆盖率{(to_float(coverage.get('supported_moneyflow_coverage')) or 0) * 100:.2f}%；"
+            f"北交所排除{int(coverage.get('excluded_bj_member_count') or 0)}只，"
+            f"纳入部分成交额覆盖率{turnover_coverage * 100:.2f}%" if turnover_coverage is not None else ""
         )
     normalized = dict(sector)
     normalized["quality"] = quality
@@ -706,6 +952,9 @@ def build_core_views(analysis: Dict[str, Any]) -> List[str]:
     fund_line = summary.get("fund_sentiment_line")
     if fund_line and "样本不足" not in fund_line:
         views.append(f"资金情绪：{fund_line}")
+    strategy_adjustments = analysis.get("daily_strategy_adjustments") or []
+    if strategy_adjustments:
+        views.append(strategy_adjustments[0])
     block_line = summary.get("block_trade_line")
     if block_line and block_line != "暂缺。":
         views.append(f"大宗交易：{block_line}")
@@ -759,21 +1008,41 @@ def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
     lines: List[str] = []
     pct = to_float(primary.get("涨跌幅"))
     close = to_float(primary.get("收盘价"))
+    pre_close = to_float(primary.get("前收盘价"))
     open_price = to_float(primary.get("开盘价"))
     high = to_float(primary.get("最高价"))
     low = to_float(primary.get("最低价"))
     amount = to_float(primary.get("成交额（亿）"))
+    moutai_net = to_float((moutai_row or {}).get("净流入（亿）"))
+    super_large = to_float((moutai_row or {}).get("超大单（亿）"))
+    large = to_float((moutai_row or {}).get("大单（亿）"))
+    baijiu_net = to_float((baijiu or {}).get("净流入（亿）"))
+    baijiu_pct = to_float((baijiu or {}).get("涨跌幅 %"))
     if pct is not None and close is not None:
         direction = "下跌" if pct < 0 else "上涨" if pct > 0 else "平盘"
+        fact_parts = []
+        if pct > 0 and baijiu_pct is not None and baijiu_pct > 0 and baijiu_net is not None and baijiu_net > 0:
+            fact_parts.append("价格与白酒Ⅱ同步走强，板块主力净流入形成同向确认")
+        elif pct < 0 and baijiu_pct is not None and baijiu_pct < 0 and baijiu_net is not None and baijiu_net < 0:
+            fact_parts.append("价格与白酒Ⅱ同步走弱，板块主力净流出形成同向确认")
+        elif moutai_net is not None and pct * moutai_net < 0:
+            fact_parts.append("股价与茅台主力净额方向相反，属于价格资金背离")
+        else:
+            fact_parts.append("价格方向已确认，资金是否形成持续趋势仍需看后续交易日")
+        if super_large is not None and large is not None and super_large * large < 0:
+            fact_parts.append("茅台超大单与大单方向相反，分档资金仍有分歧")
         structure_hint = ""
         if any("富时中国A50" in f"{item.get('title') or ''} {item.get('summary') or ''}" for item in macro_items):
             structure_hint = "尾盘还需优先识别富时A50调仓、收盘集合竞价和节前休市带来的机械性卖压。"
         lines.append(
             f"结论：今日贵州茅台{direction}{fmt_signed(pct, '%')}，收于{close:.2f}元；"
-            "核心不是单一新闻冲击，而是技术承压、白酒资金分歧和成长板块吸金共同作用。"
+            + "；".join(fact_parts)
+            + "。"
             f"{structure_hint}"
         )
     tech_parts = []
+    if pre_close is not None and close is not None and pct is not None:
+        tech_parts.append(f"前收{pre_close:.2f}、收盘{close:.2f}，按前收计算{fmt_signed(pct, '%')}")
     if open_price is not None and high is not None and low is not None and close is not None:
         tech_parts.append(f"日内开盘{open_price:.2f}、最高{high:.2f}、最低{low:.2f}、收盘{close:.2f}")
         if close < open_price:
@@ -833,9 +1102,17 @@ def build_daily_review(analysis: Dict[str, Any]) -> Dict[str, Any]:
 
     fund_sentiment = summary.get("fund_sentiment_line")
     if fund_sentiment:
-        lines.append(f"大作手式判断：先看资金，再看叙事。今日资金情绪为“{fund_sentiment}”，短线应等待资金背离收敛或白酒Ⅱ重新获得净流入确认。")
+        if baijiu_net is not None and baijiu_net > 0:
+            follow_up = "观察白酒Ⅱ能否连续净流入，并等待茅台超大单与大单分歧收敛"
+        else:
+            follow_up = "等待白酒Ⅱ重新获得净流入确认，并观察茅台分档资金是否收敛"
+        lines.append(f"大作手式判断：先看资金，再看叙事。今日资金情绪为“{fund_sentiment}”，短线应{follow_up}。")
 
-    return {"title": "今日复盘：今日下跌的核心原因", "lines": lines}
+    for adjustment in analysis.get("daily_strategy_adjustments") or []:
+        lines.append(adjustment)
+
+    title_direction = "波动" if pct is None or pct == 0 else "上涨" if pct > 0 else "下跌"
+    return {"title": f"今日复盘：今日{title_direction}的核心原因", "lines": lines}
 
 
 def build_earnings_deep_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
@@ -972,6 +1249,7 @@ def main() -> None:
             if missing_cols:
                 issues.append({"table": table_name, "row": idx, "missing_columns": missing_cols})
     issues.extend(fund_flow_sanity_issues(rows, baijiu))
+    issues.extend(quote_sanity_issues(quotes))
 
     news = read_json(data_dir / "news.json", default={}) or {}
     research = read_json(data_dir / "research.json", default={}) or {}
@@ -985,6 +1263,8 @@ def main() -> None:
     news = remove_institution_views_from_news(news, config)
     news["public_opinion"] = build_public_opinion_items(news)
     research = filter_actionable_research_items(research)
+    report_date = str(((sector.get("quality") or {}).get("target_date") or ""))[:10] or None
+    issues.extend(evidence_sanity_issues(report_date, news, research, sentiment))
 
     analysis = {
         "generated_at": now_iso(),
@@ -1028,6 +1308,11 @@ def main() -> None:
             "baijiu": baijiu,
         },
     }
+    current_date = report_date_from_analysis(analysis)
+    analysis["daily_strategy_adjustments"] = build_daily_strategy_adjustments(
+        analysis,
+        history=load_recent_archives(data_dir, current_date),
+    )
     analysis["earnings_analysis"] = build_earnings_deep_analysis(analysis)
     analysis["core_views"] = build_core_views(analysis)
     analysis["daily_review"] = build_daily_review(analysis)

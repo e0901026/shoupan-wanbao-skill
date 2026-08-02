@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -101,6 +102,26 @@ class FetchMacroTest(unittest.TestCase):
         titles = [item["title"] for item in items]
         self.assertIn("未来宏观数据窗口：PCE、非农、CPI/PPI将影响资金流向", titles)
         self.assertIn("日本央行6月会议窗口：日元利率与购债节奏将影响全球资金", titles)
+        boj = next(item for item in items if "日本央行6月会议窗口" in item["title"])
+        self.assertEqual(boj["time"], "2026-06-12")
+        self.assertEqual(boj["event_date"], "2026-06-16")
+        structure = next(item for item in items if "富时中国A50调仓" in item["title"])
+        self.assertEqual(structure["time"], "2026-06-03")
+        self.assertEqual(structure["event_date"], "2026-06-18")
+
+    def test_fetch_h15_as_of_never_uses_later_observations(self) -> None:
+        values = {
+            "DFF": [("2026-07-16", 3.63), ("2026-07-17", 3.63)],
+            "DGS2": [("2026-07-16", 4.16), ("2026-07-17", 4.18)],
+            "DGS10": [("2026-07-16", 4.57), ("2026-07-17", 4.55)],
+            "DGS30": [("2026-07-16", 5.09), ("2026-07-17", 5.06)],
+        }
+        with patch.object(fetch_macro, "fetch_fred_series", side_effect=lambda series, target: values[series]):
+            data = fetch_macro.fetch_h15_as_of("2026-07-17")
+
+        self.assertEqual(data["latest_date"], "2026-07-17")
+        self.assertEqual(data["treasury_10y_year"], 4.55)
+        self.assertEqual(data["treasury_10y_year_change_bp"], -2.0)
 
 
 if __name__ == "__main__":

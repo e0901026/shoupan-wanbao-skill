@@ -42,22 +42,47 @@ def next_day(day: str) -> str:
     return date_str(parse_date(day) + timedelta(days=1))
 
 
-def missing_daily_dates(today: str, calendar: TradeCalendar, state: dict) -> List[str]:
+def previous_completed_week_anchor(today: str, now_time: str) -> str:
+    dt = parse_date(today)
+    if dt.weekday() == 5 and after_or_equal(now_time, "09:00"):
+        return today
+    if dt.weekday() == 6:
+        return date_str(dt - timedelta(days=1))
+    if dt.weekday() == 5:
+        return date_str(dt - timedelta(days=8))
+    return date_str(dt - timedelta(days=dt.weekday() + 3))
+
+
+def completed_daily_target(today: str, now_time: str, calendar: TradeCalendar) -> str | None:
+    if calendar.is_trading_day(today) and after_or_equal(now_time, "16:00"):
+        return today
+    return calendar.previous_trading_day(today)
+
+
+def missing_daily_dates(today: str, now_time: str, calendar: TradeCalendar, state: dict) -> List[str]:
+    target = completed_daily_target(today, now_time, calendar)
+    if not target:
+        return []
     last = state.get("last_daily_date") or state.get("last_successful_report_date")
     if not last:
-        return [today] if calendar.is_trading_day(today) else []
+        return [target] if calendar.is_trading_day(target) else []
     start = next_day(str(last))
-    return calendar.trading_days_between(start, today)
+    return calendar.trading_days_between(start, target)
 
 
 def build_run_plan(today: str, now_time: str, root: Path, calendar: TradeCalendar, state_file: Path) -> RunPlan:
     state = read_state(state_file)
+    run_state = read_state(root / "data" / "run_state.json")
+    if "last_daily_date" not in state and "last_successful_report_date" not in state:
+        last_daily = run_state.get("last_successful_report_date")
+        if last_daily:
+            state["last_successful_report_date"] = last_daily
     plan = RunPlan(root=root)
     dt = parse_date(today)
-    if calendar.is_trading_day(today) and after_or_equal(now_time, "16:00"):
-        plan.daily_dates = missing_daily_dates(today, calendar, state)
-    if dt.weekday() == 5 and after_or_equal(now_time, "09:00"):
-        week_dates = calendar.week_trading_days(today)
+    plan.daily_dates = missing_daily_dates(today, now_time, calendar, state)
+    anchor = previous_completed_week_anchor(today, now_time)
+    if anchor:
+        week_dates = calendar.week_trading_days(anchor)
         weekly_out = root / "output" / f"a_share_weekly_report_{week_dates[0]}_{week_dates[-1]}.html" if week_dates else None
         if week_dates and (not weekly_out or not weekly_out.exists()):
             plan.weekly_dates = week_dates
@@ -79,6 +104,8 @@ def run(cmd: List[str]) -> None:
 def execute_plan(plan: RunPlan, config: str, py: str = sys.executable, state_file: Path | None = None) -> None:
     for day in plan.daily_dates:
         run([py, "scripts/run_daily.py", "--config", config, "--date", day])
+    if plan.daily_dates:
+        run([py, "scripts/audit_report_history.py", "--root", str(plan.root), "--dates", *plan.daily_dates])
     if plan.weekly_dates:
         run([py, "scripts/run_weekly.py", "--root", str(plan.root), "--dates", *plan.weekly_dates, "--output-dir", str(plan.root / "output")])
     if plan.morning_date and plan.morning_window_start and plan.morning_window_end:
@@ -93,6 +120,18 @@ def execute_plan(plan: RunPlan, config: str, py: str = sys.executable, state_fil
                 "--window-start",
                 plan.morning_window_start,
                 "--window-end",
+                plan.morning_window_end,
+            ]
+        )
+        run(
+            [
+                py,
+                "scripts/audit_morning_history.py",
+                "--root",
+                str(plan.root),
+                "--window",
+                plan.morning_date,
+                plan.morning_window_start,
                 plan.morning_window_end,
             ]
         )
