@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-08-02 08:00:56",
+  "content_hash": "2e8704e73100d284aa9984e807e93ce9e42b223ba70e612a3a0727873a4938ad",
+  "report_counts": {
+    "morning": 7,
+    "daily": 36,
+    "weekly": 8
+  },
+  "report_total": 51,
+  "pdf_total": 51,
+  "missing_pdfs": []
+}
