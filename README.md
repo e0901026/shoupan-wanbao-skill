@@ -104,7 +104,7 @@ python scripts/render_index.py --output-dir output
 python scripts/build_site.py --output-dir output --site-dir site --generate-pdfs
 ```
 
-站点快照写入 `site/`，由 `.github/workflows/pages.yml` 发布。`output/` 仍保持本机运行目录并继续忽略，不提交 token、抓取缓存或原始数据。
+站点快照写入 `site/`，发布脚本会将该目录同步到 `gh-pages` 分支，由 GitHub Pages 直接托管，不依赖 GitHub Actions。`output/` 仍保持本机运行目录并继续忽略，不提交 token、抓取缓存或原始数据。
 
 无人值守任务可在报告中心成功后执行：
 
@@ -112,7 +112,7 @@ python scripts/build_site.py --output-dir output --site-dir site --generate-pdfs
 python scripts/publish_site.py --repo . --push
 ```
 
-该命令只暂存并提交 `site/`；检测到其它已暂存文件时会拒绝自动提交，防止把无关改动或凭证带入站点更新。
+该命令只暂存并提交 `site/`，随后推送当前分支和 `gh-pages` 站点分支；检测到其它已暂存文件时会拒绝自动提交，防止把无关改动或凭证带入站点更新。
 
 按需导出 PDF：
 

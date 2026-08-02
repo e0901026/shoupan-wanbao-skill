@@ -51,6 +51,9 @@ def publish_site(
     branch = git_output(root, "branch", "--show-current") or "main"
     git_output(root, "push", "origin", branch)
     result["pushed"] = True
+    pages_sha = git_output(root, "subtree", "split", "--prefix", str(site_dir))
+    git_output(root, "push", "origin", f"{pages_sha}:refs/heads/gh-pages")
+    result["pages_branch_pushed"] = True
     return result
 
 
